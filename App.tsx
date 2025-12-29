@@ -448,7 +448,7 @@ const App: React.FC = () => {
   };
 
   const saveHistory = (item: HistoryItem) => {
-    const newHistory = [item, ...history].slice(0, 20);
+    const newHistory = [item, ...history].slice(0, 5);
     setHistory(newHistory);
     localStorage.setItem('math_history', JSON.stringify(newHistory));
   };

@@ -406,7 +406,7 @@ const App = () => {
   };
 
   const saveHistory = (item: HistoryItem) => {
-    const newHistory = [item, ...history].slice(0, 20);
+    const newHistory = [item, ...history].slice(0, 5);
     setHistory(newHistory);
     localStorage.setItem('math_history', JSON.stringify(newHistory));
   };
@@ -617,12 +617,12 @@ const App = () => {
           <div className="flex-1 flex flex-col justify-center items-center">
             <div className="w-full max-w-md bg-white rounded-[2.5rem] shadow-xl p-8 flex flex-col border-b-8 border-blue-400">
               <div onClick={() => setShowFullImage(true)} className="relative h-28 w-full bg-gray-100 rounded-2xl overflow-hidden mb-4"><img src={croppedImage || ""} className="h-full w-full object-contain" alt="figure" /><Maximize className="absolute bottom-2 right-2" size={12} /></div>
-              {prevStep && <div className="mb-6 bg-blue-50 rounded-2xl p-4 border border-blue-100"><p className="text-[10px] font-black text-blue-400">前のステップ</p><p className="text-sm font-black text-blue-700">{prevStep.solution}</p></div>}
+              {prevStep && <div className="mb-6 bg-blue-50 rounded-2xl p-4 border border-blue-100"><p className="text-[10px] font-black text-blue-400">前のステップのこたえ</p><p className="text-sm font-black text-blue-700">{prevStep.solution}</p></div>}
               <div className="flex items-center justify-between mb-4"><span className="px-5 py-1 rounded-full text-sm font-black bg-blue-500 text-white">ステップ {currentStepIndex + 1}</span><AITeacher mood="SUPPORTIVE" className="scale-75" /></div>
               <div className="flex-1 bg-white p-6 rounded-[2rem] border-2 border-dashed border-blue-100 flex items-center justify-center text-center"><p className="text-xl font-black text-gray-800">{currentStep.hint}</p></div>
               <div className="mt-8 flex gap-3">
                 <button onClick={() => currentStepIndex > 0 ? setCurrentStepIndex(currentStepIndex - 1) : setCurrentScreen(AppScreen.HOME)} className="flex-1 bg-gray-100 text-gray-500 py-4 rounded-2xl font-black">もどる</button>
-                <button onClick={() => setCurrentStepIndex(currentStepIndex + 1)} className="flex-[2] bg-blue-500 text-white py-4 rounded-2xl font-black shadow-lg">{isLastStep ? "答え合わせ！" : "次へ！"}</button>
+                <button onClick={() => setCurrentStepIndex(currentStepIndex + 1)} className="flex-[2] bg-blue-500 text-white py-4 rounded-2xl font-black shadow-lg">{isLastStep ? "答え合わせ！" : "かんがえた！（すすむ）"}</button>
               </div>
             </div>
           </div>
@@ -685,7 +685,16 @@ const App = () => {
       <div className="bg-blue-500 text-white p-8 text-center"><AITeacher mood="HAPPY" className="mb-4" /><h2 className="text-2xl font-black">Proプラン</h2><p>算数をもっとたのしく！</p></div>
       <main className="p-8 flex-1 flex flex-col justify-between">
         <div className="space-y-4"><div className="flex items-center gap-4 bg-blue-50 p-4 rounded-2xl"><Check className="text-blue-500" /><p className="font-black">制限なしで使い放題</p></div><div className="flex items-center gap-4 bg-blue-50 p-4 rounded-2xl"><Check className="text-blue-500" /><p className="font-black">類題ドリルで特訓</p></div></div>
-        <button onClick={() => { setIsPro(true); setCurrentScreen(AppScreen.HOME); }} className="w-full bg-blue-500 text-white py-5 rounded-2xl text-xl font-black">¥480 / 月 で登録</button>
+        <div className="space-y-3">
+          <button onClick={() => { setIsPro(true); setCurrentScreen(AppScreen.HOME); }} className="w-full bg-blue-500 text-white py-5 rounded-2xl text-xl font-black">¥480 / 月 で登録</button>
+          <button
+            onClick={() => setCurrentScreen(AppScreen.HOME)}
+            aria-label="いまはやめておく（ホームに戻る）"
+            className="w-full border border-blue-500 text-blue-500 bg-white py-5 rounded-2xl text-xl font-black focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-500"
+          >
+            いまはやめておく
+          </button>
+        </div>
       </main>
     </div>
   );
