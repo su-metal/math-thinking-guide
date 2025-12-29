@@ -1,0 +1,28 @@
+.env.local
+.gitignore
+AGENTS.md
+App.tsx
+index.html
+index.tsx
+metadata.json
+next-env.d.ts
+package-lock.json
+package.json
+postcss.config.cjs
+README.md
+tailwind.config.cjs
+tree.txt
+tsconfig.json
+types.ts
+vite.config.ts
+app
+  globals.css
+  layout.tsx
+  page.tsx
+  api
+    analyze
+      route.ts
+    drill
+      route.ts
+services
+  geminiService.ts

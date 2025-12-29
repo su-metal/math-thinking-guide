@@ -121,8 +121,36 @@ export async function POST(req: Request) {
       },
     });
 
-    const parsed = JSON.parse(response.text || "{}");
-    return NextResponse.json(parsed);
+    const raw = response.text ?? "";
+
+    // 余計な前後テキストが混ざるケース対策：最初の { 〜 最後の } を抜く
+    const start = raw.indexOf("{");
+    const end = raw.lastIndexOf("}");
+
+    if (start === -1 || end === -1 || end <= start) {
+      console.error("Non-JSON response head:", raw.slice(0, 300));
+      console.error("Non-JSON response tail:", raw.slice(-300));
+      return NextResponse.json(
+        { error: "AIの出力がJSON形式になりませんでした。もう一度試してね。" },
+        { status: 502 }
+      );
+    }
+
+    const jsonCandidate = raw.slice(start, end + 1);
+
+    try {
+      const parsed = JSON.parse(jsonCandidate);
+      return NextResponse.json(parsed);
+    } catch (e) {
+      console.error("JSON parse failed. length:", jsonCandidate.length);
+      console.error("JSON head:", jsonCandidate.slice(0, 300));
+      console.error("JSON tail:", jsonCandidate.slice(-300));
+      return NextResponse.json(
+        { error: "AIの出力が途中で崩れました。もう一度撮って試してね。" },
+        { status: 502 }
+      );
+    }
+
   } catch (error) {
     console.error("AI Analysis failed:", error);
     return NextResponse.json(
