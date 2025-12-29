@@ -600,6 +600,37 @@ const App: React.FC = () => {
     }
   };
 
+  function ThoughtBlockYellow({
+    title,
+    text,
+  }: {
+    title: string;
+    text: string;
+  }) {
+    return (
+      <div className="rounded-[1.6rem] border-2 border-amber-200 bg-amber-50 shadow-[0_12px_30px_rgba(0,0,0,0.06)] overflow-hidden">
+        <div className="p-5 relative">
+          {/* watermark */}
+          <div className="absolute top-3 right-4 opacity-15 text-amber-500">
+            <Lightbulb className="w-16 h-16" />
+          </div>
+
+          <div className="flex items-center gap-3 mb-3">
+            <div className="w-9 h-9 rounded-xl bg-amber-500 flex items-center justify-center text-white shadow-sm">
+              <Lightbulb className="w-5 h-5" />
+            </div>
+            <p className="text-sm font-black text-amber-800">{title}</p>
+          </div>
+
+          <p className="text-[15px] font-black leading-relaxed text-amber-900">
+            {text}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+
   const renderOnboarding = () => (
     <div className="min-h-screen bg-white flex flex-col items-center p-8 text-center animate-in fade-in duration-500">
       <div className="flex-1 flex flex-col items-center justify-center space-y-8">
@@ -949,6 +980,15 @@ const App: React.FC = () => {
                       <ArrowDown size={14} className="text-blue-400" />
                     </div>
                   </div>
+                </div>
+              )}
+
+              {currentStepIndex === 0 && (
+                <div className="mb-4">
+                  <ThoughtBlockYellow
+                    title="スパッキーの考え方"
+                    text="まずは問題文に書かれている『わかっていること』と『知りたいこと』を分けてみよう。いまの数字は、どんな見方にそろえると比べやすいかな？"
+                  />
                 </div>
               )}
 
