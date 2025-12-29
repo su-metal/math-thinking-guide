@@ -1,0 +1,8 @@
+
+{
+  "name": "算数「考え方」ガイド",
+  "description": "小学生の算数の文章題を写真で撮ると、解き方のステップを優しく教えてくれるアプリです。",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
