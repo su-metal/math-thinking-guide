@@ -1,13 +1,14 @@
+'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
 import { AppScreen, AnalysisResult, HistoryItem, DrillProblem, DrillResult, MathProblem } from './types';
 import { analyzeMathProblem, generateDrillProblems } from './services/geminiService';
-import { 
-  Camera, 
-  Image as ImageIcon, 
-  History, 
-  Settings, 
-  ChevronLeft, 
+import {
+  Camera,
+  Image as ImageIcon,
+  History,
+  Settings,
+  ChevronLeft,
   X,
   CreditCard,
   Sparkles,
@@ -34,6 +35,55 @@ import {
   MessageCircle,
   Undo2
 } from 'lucide-react';
+
+const isQuotaExceededError = (error: unknown): boolean => {
+  if (typeof error === 'object' && error !== null) {
+    if (typeof DOMException !== 'undefined' && error instanceof DOMException) {
+      return /Quota/.test(error.name);
+    }
+    const errName = (error as { name?: string }).name;
+    return typeof errName === 'string' && /quota/i.test(errName);
+  }
+  return false;
+};
+
+const persistHistory = (items: HistoryItem[]): HistoryItem[] => {
+  if (items.length === 0) {
+    localStorage.removeItem('math_history');
+    return [];
+  }
+
+  const limits = [5, 3, 1];
+  for (const limit of limits) {
+    const candidate = items.slice(0, limit);
+    try {
+      localStorage.setItem('math_history', JSON.stringify(candidate));
+      return candidate;
+    } catch (error) {
+      console.error(`Failed to persist math_history (limit ${limit})`, error);
+      if (!isQuotaExceededError(error)) {
+        return candidate;
+      }
+    }
+  }
+
+  localStorage.removeItem('math_history');
+  return items.slice(0, 1);
+};
+
+const loadStoredHistory = (): HistoryItem[] => {
+  const raw = localStorage.getItem('math_history');
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (error) {
+    console.error('Failed to parse saved math_history', error);
+    localStorage.removeItem('math_history');
+    return [];
+  }
+};
+
 
 // --- AI Teacher Illustration Component ---
 
@@ -128,15 +178,15 @@ const AITeacher = ({ mood = 'NORMAL', className = "" }: { mood?: TeacherMood, cl
 
 // --- Components ---
 
-const Header = ({ 
-  title, 
-  leftIcon, 
-  rightIcon, 
-  onLeftClick, 
-  onRightClick 
-}: { 
-  title: string; 
-  leftIcon?: React.ReactNode; 
+const Header = ({
+  title,
+  leftIcon,
+  rightIcon,
+  onLeftClick,
+  onRightClick
+}: {
+  title: string;
+  leftIcon?: React.ReactNode;
   rightIcon?: React.ReactNode;
   onLeftClick?: () => void;
   onRightClick?: () => void;
@@ -175,13 +225,13 @@ const LimitReachedModal = ({ onConfirm, onCancel }: { onConfirm: () => void, onC
         <span className="font-bold text-blue-500">Proプラン</span>なら、ずっと使い放題！
       </p>
       <div className="w-full space-y-3">
-        <button 
+        <button
           onClick={onConfirm}
           className="w-full bg-blue-500 text-white py-4 rounded-2xl font-bold text-lg shadow-lg shadow-blue-100 active:scale-95 transition-all"
         >
           Proプランについて見る
         </button>
-        <button 
+        <button
           onClick={onCancel}
           className="w-full text-gray-400 py-2 text-sm font-medium hover:text-gray-600 transition-colors"
         >
@@ -193,17 +243,17 @@ const LimitReachedModal = ({ onConfirm, onCancel }: { onConfirm: () => void, onC
 );
 
 // --- Crop Component ---
-const ProblemCropScreen = ({ 
-  image, 
-  onCancel, 
-  onComplete 
-}: { 
-  image: string; 
-  onCancel: () => void; 
-  onComplete: (croppedImage: string) => void; 
+const ProblemCropScreen = ({
+  image,
+  onCancel,
+  onComplete
+}: {
+  image: string;
+  onCancel: () => void;
+  onComplete: (croppedImage: string) => void;
 }) => {
   const [box, setBox] = useState({ x: 10, y: 10, w: 80, h: 40 });
-  const [rotation, setRotation] = useState(0); 
+  const [rotation, setRotation] = useState(0);
   const [naturalSize, setNaturalSize] = useState({ w: 0, h: 0 });
   const imgRef = useRef<HTMLImageElement>(null);
   const [isDragging, setIsDragging] = useState<string | null>(null);
@@ -220,11 +270,11 @@ const ProblemCropScreen = ({
 
   const handleMove = (e: React.MouseEvent | React.TouchEvent) => {
     if (!isDragging || !imgRef.current) return;
-    
+
     const rect = imgRef.current.getBoundingClientRect();
     const clientX = 'touches' in e ? e.touches[0].clientX : e.clientX;
     const clientY = 'touches' in e ? e.touches[0].clientY : e.clientY;
-    
+
     const xPercent = ((clientX - rect.left) / rect.width) * 100;
     const yPercent = ((clientY - rect.top) / rect.height) * 100;
 
@@ -274,7 +324,7 @@ const ProblemCropScreen = ({
       const finalCanvas = document.createElement('canvas');
       finalCanvas.width = Math.floor((box.w * rotatedCanvas.width) / 100);
       finalCanvas.height = Math.floor((box.h * rotatedCanvas.height) / 100);
-      
+
       const finalCtx = finalCanvas.getContext('2d');
       if (finalCtx) {
         finalCtx.imageSmoothingEnabled = true;
@@ -302,7 +352,7 @@ const ProblemCropScreen = ({
 
   const maxDisplayW = window.innerWidth * 0.92;
   const maxDisplayH = window.innerHeight * 0.65;
-  
+
   const aspect = visualW / visualH;
   let displayW, displayH;
 
@@ -323,8 +373,8 @@ const ProblemCropScreen = ({
           <RotateCw size={20} /> <span className="text-xs">回転</span>
         </button>
       </div>
-      
-      <div 
+
+      <div
         className="flex-1 relative flex items-center justify-center overflow-hidden touch-none p-4"
         onMouseMove={handleMove}
         onMouseUp={handleEnd}
@@ -332,16 +382,16 @@ const ProblemCropScreen = ({
         onTouchMove={handleMove}
         onTouchEnd={handleEnd}
       >
-        <div 
-          className="relative shadow-2xl transition-all duration-300 ease-out flex items-center justify-center bg-white/5" 
+        <div
+          className="relative shadow-2xl transition-all duration-300 ease-out flex items-center justify-center bg-white/5"
           style={{ width: displayW, height: displayH }}
         >
-          <img 
+          <img
             ref={imgRef}
-            src={image} 
+            src={image}
             className="absolute block pointer-events-none"
-            style={{ 
-              width: isRotated90 ? displayH : displayW, 
+            style={{
+              width: isRotated90 ? displayH : displayW,
               height: isRotated90 ? displayW : displayH,
               transform: `rotate(${rotation}deg)`,
               transition: 'transform 0.3s ease-out'
@@ -353,12 +403,12 @@ const ProblemCropScreen = ({
             clipPath: `polygon(0% 0%, 0% 100%, ${box.x}% 100%, ${box.x}% ${box.y}%, ${box.x + box.w}% ${box.y}%, ${box.x + box.w}% ${box.y + box.h}%, ${box.x}% ${box.y + box.h}%, ${box.x}% 100%, 100% 100%, 100% 0%)`,
             backgroundColor: 'rgba(0,0,0,0.7)'
           }}></div>
-          <div 
+          <div
             className="absolute border-[4px] border-blue-400 shadow-[0_0_0_2px_rgba(255,255,255,0.4)] cursor-move pointer-events-auto"
-            style={{ 
-              left: `${box.x}%`, 
-              top: `${box.y}%`, 
-              width: `${box.w}%`, 
+            style={{
+              left: `${box.x}%`,
+              top: `${box.y}%`,
+              width: `${box.w}%`,
               height: `${box.h}%`,
               boxShadow: isDragging ? '0 0 60px rgba(59, 130, 246, 0.9)' : 'none'
             }}
@@ -368,7 +418,7 @@ const ProblemCropScreen = ({
             <div className="absolute -top-11 left-0 bg-blue-500 text-white text-[11px] px-3 py-2 rounded-t-lg font-bold flex items-center gap-1.5 whitespace-nowrap shadow-xl">
               <Check size={14} /> ここを解く！
             </div>
-            <div 
+            <div
               className="absolute -bottom-6 -right-6 w-14 h-14 bg-blue-500 border-4 border-white rounded-full cursor-se-resize flex items-center justify-center shadow-2xl active:scale-125 transition-transform z-20"
               onMouseDown={(e) => { e.stopPropagation(); handleStart(e, 'br'); }}
               onTouchStart={(e) => { e.stopPropagation(); handleStart(e, 'br'); }}
@@ -378,11 +428,11 @@ const ProblemCropScreen = ({
           </div>
         </div>
       </div>
-      
+
       <div className="p-8 bg-black shrink-0 flex flex-col items-center gap-4 border-t border-white/5">
         <p className="text-white/40 text-[11px] font-medium tracking-wide">※青いわくを動かして、問題をかこんでね！</p>
-        <button 
-          onClick={processCrop} 
+        <button
+          onClick={processCrop}
           className="bg-blue-500 text-white px-20 py-4 rounded-full text-xl font-black shadow-[0_10px_30px_rgba(59,130,246,0.3)] active:scale-95 transition-all flex items-center gap-3"
         >
           <Sparkles size={24} /> この問題を解く！
@@ -421,8 +471,8 @@ const App: React.FC = () => {
       }
     }, 2000);
 
-    const savedHistory = localStorage.getItem('math_history');
-    if (savedHistory) setHistory(JSON.parse(savedHistory));
+    const historyFromStorage = loadStoredHistory();
+    setHistory(historyFromStorage);
 
     const lastReset = localStorage.getItem('last_reset_date');
     const today = new Date().toLocaleDateString();
@@ -448,9 +498,10 @@ const App: React.FC = () => {
   };
 
   const saveHistory = (item: HistoryItem) => {
-    const newHistory = [item, ...history].slice(0, 5);
-    setHistory(newHistory);
-    localStorage.setItem('math_history', JSON.stringify(newHistory));
+    setHistory((prev) => {
+      const combined = [item, ...prev];
+      return persistHistory(combined);
+    });
   };
 
   const decreaseTries = () => {
@@ -498,7 +549,7 @@ const App: React.FC = () => {
       setAnalysisResult(result);
       setCurrentProblemIndex(0);
       setCurrentStepIndex(0);
-      
+
       if (result.problems && result.problems.length > 1) {
         setCurrentScreen(AppScreen.PROBLEM_SELECT);
       } else if (result.problems && result.problems.length === 1) {
@@ -506,7 +557,7 @@ const App: React.FC = () => {
       } else {
         throw new Error("問題が見つかりませんでした。もっと明るい場所で、問題を大きく撮ってみてね。");
       }
-      
+
       const historyItem: HistoryItem = {
         id: Date.now().toString(),
         timestamp: Date.now(),
@@ -606,8 +657,8 @@ const App: React.FC = () => {
                 </div>
               </div>
               {!isPro && (
-                <button 
-                  onClick={() => setCurrentScreen(AppScreen.PAYWALL)} 
+                <button
+                  onClick={() => setCurrentScreen(AppScreen.PAYWALL)}
                   className="bg-yellow-400 text-yellow-900 px-5 py-2 rounded-full text-xs font-black shadow-sm shadow-yellow-100 hover:bg-yellow-500 transition-colors active:scale-95"
                 >
                   Proプランへ
@@ -622,13 +673,12 @@ const App: React.FC = () => {
               </div>
 
               <label className="group bg-blue-500 hover:bg-blue-600 transition-all rounded-[2.5rem] p-10 lg:p-16 flex flex-col items-center justify-center text-white shadow-xl shadow-blue-200 cursor-pointer active:scale-95 relative overflow-hidden">
-                <div className="absolute top-0 right-0 p-4 opacity-10"><Camera size={120} /></div>
                 <Camera className="w-16 h-16 lg:w-24 lg:h-24 mb-4 group-hover:scale-110 transition-transform relative z-10" />
                 <span className="text-3xl lg:text-4xl font-black relative z-10">自動スキャン</span>
                 <p className="text-blue-100 text-sm mt-2 relative z-10 font-bold">1問ならそのまま解説へ！</p>
                 <input type="file" accept="image/*" capture="environment" className="hidden" onChange={(e) => handleImageUpload(e)} />
               </label>
-              
+
               <div className="grid grid-cols-2 gap-4">
                 <label className="group bg-white border-2 border-blue-100 hover:border-blue-400 transition-all rounded-[2rem] p-6 lg:p-8 flex flex-col items-center justify-center text-blue-500 cursor-pointer active:scale-95">
                   <ImageIcon className="w-8 h-8 lg:w-10 lg:h-10 mb-2 group-hover:scale-110 transition-transform" />
@@ -643,8 +693,8 @@ const App: React.FC = () => {
               </div>
 
               <div className="pt-2 flex justify-center">
-                <button 
-                  onClick={navigateToOnboarding} 
+                <button
+                  onClick={navigateToOnboarding}
                   className="flex items-center gap-2 px-6 py-3 text-gray-400 hover:text-blue-500 transition-colors group"
                 >
                   <HelpCircle size={18} className="group-hover:animate-bounce" />
@@ -657,7 +707,7 @@ const App: React.FC = () => {
       </main>
 
       {showLimitReachedModal && (
-        <LimitReachedModal 
+        <LimitReachedModal
           onConfirm={() => {
             setShowLimitReachedModal(false);
             setCurrentScreen(AppScreen.PAYWALL);
@@ -672,10 +722,10 @@ const App: React.FC = () => {
     <div className="min-h-screen bg-blue-50 flex flex-col items-center justify-center p-8 text-center">
       <div className="bg-white rounded-[2rem] shadow-2xl mb-10 p-4 border-4 border-white inline-flex items-center justify-center max-w-[80vw]">
         {croppedImage && (
-          <img 
-            src={croppedImage} 
+          <img
+            src={croppedImage}
             className="rounded-xl w-auto h-auto max-w-full max-h-[40vh] block shadow-inner"
-            alt="cropped" 
+            alt="cropped"
           />
         )}
       </div>
@@ -699,11 +749,11 @@ const App: React.FC = () => {
               <LayoutList size={20} /> {analysisResult.problems.length}個の問題が見つかったよ！
             </p>
           </div>
-          
+
           <div className="w-full flex overflow-x-auto snap-x snap-mandatory scrollbar-hide gap-6 px-4 pb-8">
             {analysisResult.problems.map((p, idx) => (
-              <div 
-                key={p.id || idx} 
+              <div
+                key={p.id || idx}
                 className="snap-center shrink-0 w-[85vw] max-w-sm bg-white rounded-[2.5rem] shadow-xl p-8 flex flex-col border-b-8 border-blue-400 border-r border-l border-t border-gray-100"
               >
                 <div className="flex items-center gap-3 mb-4">
@@ -712,14 +762,14 @@ const App: React.FC = () => {
                   </div>
                   <span className="text-sm font-black text-gray-400">もんだい</span>
                 </div>
-                
+
                 <div className="flex-1 overflow-y-auto mb-8 bg-gray-50 p-6 rounded-3xl border border-dashed border-gray-200">
                   <p className="text-gray-700 leading-relaxed font-black">
                     {p.problem_text}
                   </p>
                 </div>
-                
-                <button 
+
+                <button
                   onClick={() => selectProblem(idx)}
                   className="w-full bg-blue-500 text-white py-5 rounded-2xl font-black text-lg shadow-lg shadow-blue-100 flex items-center justify-center gap-2 active:scale-95 transition-all"
                 >
@@ -728,7 +778,7 @@ const App: React.FC = () => {
               </div>
             ))}
           </div>
-          
+
           <div className="flex gap-2">
             {analysisResult.problems.map((_, idx) => (
               <div key={idx} className={`w-2 h-2 rounded-full bg-blue-200`} />
@@ -744,7 +794,7 @@ const App: React.FC = () => {
     if (!analysisResult || !analysisResult.problems[currentProblemIndex]) return null;
     const problem = analysisResult.problems[currentProblemIndex];
     const isFinishedSteps = currentStepIndex === problem.steps.length;
-    
+
     if (isFinishedSteps) {
       return (
         <div className="min-h-screen bg-gray-50 flex flex-col">
@@ -764,19 +814,19 @@ const App: React.FC = () => {
                     </p>
                   </div>
                   <div className="w-full space-y-3">
-                    <button 
+                    <button
                       onClick={() => setShowFinalAnswer(true)}
                       className="w-full bg-blue-500 text-white py-5 rounded-2xl font-black text-lg shadow-lg shadow-blue-100 flex items-center justify-center gap-2 active:scale-95 transition-all"
                     >
                       <Eye size={20} /> 答えを見る！
                     </button>
-                    <button 
+                    <button
                       onClick={() => setCurrentStepIndex(problem.steps.length - 1)}
                       className="w-full bg-gray-100 text-gray-500 py-4 rounded-2xl font-black flex items-center justify-center gap-2 active:scale-95 transition-all"
                     >
                       <Undo2 size={18} /> 解説にもどる
                     </button>
-                    <button 
+                    <button
                       onClick={() => setCurrentScreen(AppScreen.HOME)}
                       className="w-full bg-white text-gray-400 py-2 text-xs font-black active:scale-95 transition-all"
                     >
@@ -796,9 +846,9 @@ const App: React.FC = () => {
                       {problem.final_answer}
                     </p>
                   </div>
-                  
+
                   <div className="w-full space-y-3">
-                    <button 
+                    <button
                       onClick={startDrills}
                       disabled={isLoadingDrills}
                       className="w-full bg-gradient-to-r from-indigo-500 to-blue-600 text-white py-5 rounded-2xl font-black text-lg shadow-lg flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
@@ -813,8 +863,8 @@ const App: React.FC = () => {
                         </>
                       )}
                     </button>
-                    
-                    <button 
+
+                    <button
                       onClick={() => {
                         setShowFinalAnswer(false);
                         setCurrentStepIndex(problem.steps.length - 1);
@@ -825,15 +875,15 @@ const App: React.FC = () => {
                     </button>
 
                     {analysisResult.problems.length > 1 && (
-                      <button 
+                      <button
                         onClick={() => setCurrentScreen(AppScreen.PROBLEM_SELECT)}
                         className="w-full bg-white border-2 border-gray-100 text-gray-500 py-4 rounded-2xl font-black flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
                       >
                         <LayoutList size={20} /> 他の問題をえらぶ
                       </button>
                     )}
-                    
-                    <button 
+
+                    <button
                       onClick={() => setCurrentScreen(AppScreen.HOME)}
                       className="w-full bg-white text-gray-400 py-2 text-xs font-black flex items-center justify-center gap-2 active:scale-95 transition-all"
                     >
@@ -854,10 +904,10 @@ const App: React.FC = () => {
 
     return (
       <div className="min-h-screen bg-gray-50 flex flex-col">
-        <Header 
-          title="スパッキーのガイド" 
-          leftIcon={analysisResult.problems.length > 1 ? <LayoutList /> : <X />} 
-          onLeftClick={() => analysisResult.problems.length > 1 ? setCurrentScreen(AppScreen.PROBLEM_SELECT) : setCurrentScreen(AppScreen.HOME)} 
+        <Header
+          title="スパッキーのガイド"
+          leftIcon={analysisResult.problems.length > 1 ? <LayoutList /> : <X />}
+          onLeftClick={() => analysisResult.problems.length > 1 ? setCurrentScreen(AppScreen.PROBLEM_SELECT) : setCurrentScreen(AppScreen.HOME)}
         />
         <main className="flex-1 flex flex-col p-4 overflow-y-auto scrollbar-hide">
           <div className="bg-white rounded-2xl p-5 shadow-sm mb-4 border border-gray-100 shrink-0">
@@ -867,17 +917,17 @@ const App: React.FC = () => {
 
           <div className="flex-1 relative flex items-center justify-center py-4">
             <div className={`w-full max-w-md bg-white rounded-[2.5rem] shadow-xl p-8 flex flex-col min-h-[520px] border-b-8 border-blue-400 animate-in slide-in-from-right duration-300 relative`}>
-              
+
               <div className="mb-4">
                 <p className="text-[10px] font-black text-gray-400 uppercase mb-2">図・イラスト</p>
-                <div 
+                <div
                   onClick={() => setShowFullImage(true)}
                   className="relative h-28 w-full bg-gray-100 rounded-2xl overflow-hidden border border-gray-200 cursor-pointer group active:scale-95 transition-all"
                 >
                   {croppedImage && (
-                    <img 
-                      src={croppedImage} 
-                      className="h-full w-full object-contain" 
+                    <img
+                      src={croppedImage}
+                      className="h-full w-full object-contain"
                       alt="figure"
                     />
                   )}
@@ -911,8 +961,7 @@ const App: React.FC = () => {
 
               <div className="flex-1 flex flex-col justify-center items-center text-center">
                 <div className="bg-white p-6 rounded-[2rem] border-2 border-dashed border-blue-100 w-full min-h-[160px] flex flex-col items-center justify-center relative">
-                   <MessageCircle size={16} className="absolute top-2 left-2 text-blue-200" />
-                   <p className="text-xl font-black text-gray-800 leading-relaxed">
+                  <p className="text-xl font-black text-gray-800 leading-relaxed">
                     {currentStep.hint}
                   </p>
                 </div>
@@ -925,7 +974,7 @@ const App: React.FC = () => {
               </div>
 
               <div className="mt-8 flex gap-3">
-                <button 
+                <button
                   onClick={() => {
                     if (currentStepIndex > 0) {
                       setCurrentStepIndex(currentStepIndex - 1);
@@ -934,18 +983,18 @@ const App: React.FC = () => {
                     } else {
                       setCurrentScreen(AppScreen.HOME);
                     }
-                  }} 
+                  }}
                   className="flex-1 bg-gray-100 text-gray-500 py-4 rounded-2xl font-black transition-colors hover:bg-gray-200 active:scale-95 flex items-center justify-center gap-1"
                 >
                   <Undo2 size={18} /> もどる
                 </button>
-                <button 
+                <button
                   onClick={() => {
                     setCurrentStepIndex(currentStepIndex + 1);
                   }}
                   className={`flex-[2] py-4 rounded-2xl font-black text-white shadow-lg transition-all active:scale-95 ${isLastStep ? 'bg-indigo-600 shadow-indigo-200 hover:bg-indigo-700' : 'bg-blue-500 shadow-blue-200 hover:bg-blue-600'}`}
                 >
-                  {isLastStep ? "結論を出して、答え合わせ！" : "答えをかいて次へ！"}
+                  {isLastStep ? "最後まで考えた！" : "考えたよ！（つぎへ）"}
                 </button>
               </div>
             </div>
@@ -961,7 +1010,7 @@ const App: React.FC = () => {
         {showFullImage && (
           <div className="fixed inset-0 z-[150] bg-black/95 flex flex-col animate-in fade-in duration-300">
             <div className="h-16 flex justify-end items-center px-4">
-              <button 
+              <button
                 onClick={() => setShowFullImage(false)}
                 className="p-3 bg-white/20 rounded-full text-white hover:bg-white/30"
               >
@@ -970,8 +1019,8 @@ const App: React.FC = () => {
             </div>
             <div className="flex-1 flex items-center justify-center p-4">
               {croppedImage && (
-                <img 
-                  src={croppedImage} 
+                <img
+                  src={croppedImage}
                   className="max-w-full max-h-full object-contain rounded-lg shadow-2xl"
                   alt="full figure"
                 />
@@ -1042,14 +1091,14 @@ const App: React.FC = () => {
 
               <div className="mt-8">
                 {!showDrillAnswer ? (
-                  <button 
+                  <button
                     onClick={() => setShowDrillAnswer(true)}
                     className="w-full bg-indigo-500 text-white py-5 rounded-2xl font-black text-lg shadow-lg shadow-indigo-100 active:scale-95 transition-all flex items-center justify-center gap-2"
                   >
                     <Eye size={20} /> 答えあわせをする！
                   </button>
                 ) : (
-                  <button 
+                  <button
                     onClick={() => {
                       if (isLast) {
                         setCurrentScreen(AppScreen.HOME);
@@ -1072,44 +1121,62 @@ const App: React.FC = () => {
   };
 
   const renderHistory = () => (
-    <div className="min-h-screen bg-gray-50">
-      <Header title="これまでの冒険" leftIcon={<ChevronLeft />} onLeftClick={() => setCurrentScreen(AppScreen.HOME)} />
-      <main className="p-4 space-y-4">
+    <div className="min-h-screen bg-gray-50 flex flex-col">
+      <Header
+        title="これまでのきろく"
+        leftIcon={<ChevronLeft />}
+        onLeftClick={() => setCurrentScreen(AppScreen.HOME)}
+      />
+      <main className="p-4 space-y-4 flex-1 overflow-y-auto">
         {history.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-24 text-gray-400">
             <AITeacher mood="THINKING" className="opacity-30 mb-6" />
-            <p className="font-black">まだ冒険のきろくがないよ</p>
+            <p className="font-black">まだきろくがないよ</p>
           </div>
         ) : (
-          history.map(item => (
-            <button key={item.id} onClick={() => { setAnalysisResult(item.result); setCroppedImage(item.image); setCurrentProblemIndex(0); setCurrentStepIndex(0); setCurrentScreen(item.result.problems.length > 1 ? AppScreen.PROBLEM_SELECT : AppScreen.RESULT); }} className="w-full bg-white p-4 rounded-3xl flex items-center gap-4 shadow-sm border border-transparent active:border-blue-200 text-left hover:shadow-md transition-all group overflow-hidden">
-              <div className="h-24 w-24 bg-gray-100 rounded-2xl overflow-hidden flex items-center justify-center shrink-0 border-2 border-gray-50 p-1 group-hover:bg-gray-200 transition-colors">
-                <img 
-                  src={item.image} 
-                  style={{ width: 'auto', height: '100%', maxWidth: '100%', objectFit: 'contain', display: 'block' }}
-                  className="rounded-sm" 
-                  alt="problem" 
-                />
-              </div>
+          history.map((item) => (
+            <button
+              key={item.id}
+              onClick={() => {
+                setAnalysisResult(item.result);
+                setCroppedImage(item.image);
+                setCurrentProblemIndex(0);
+                setCurrentStepIndex(0);
+                setCurrentScreen(
+                  item.result.problems.length > 1
+                    ? AppScreen.PROBLEM_SELECT
+                    : AppScreen.RESULT
+                );
+              }}
+              className="w-full bg-white p-4 rounded-3xl flex items-center gap-4 shadow-sm text-left"
+            >
+              <img
+                src={item.image}
+                className="h-16 w-16 object-contain bg-gray-50 rounded-xl shrink-0"
+                alt="history"
+              />
               <div className="flex-1 min-w-0">
-                <p className="text-[10px] text-gray-400 mb-1 font-black uppercase tracking-tighter">{new Date(item.timestamp).toLocaleDateString('ja-JP')} {new Date(item.timestamp).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</p>
-                <p className="text-sm font-black text-gray-700 line-clamp-2 leading-relaxed">{item.result.problems[0]?.problem_text}</p>
+                <p className="text-[10px] text-gray-400">
+                  {new Date(item.timestamp).toLocaleDateString('ja-JP')}
+                </p>
+                <p className="text-sm font-black truncate">
+                  {item.result.problems[0]?.problem_text}
+                </p>
               </div>
-              <ChevronLeft className="rotate-180 text-gray-300 shrink-0 group-hover:text-blue-400 transition-colors" />
+              <ChevronLeft className="rotate-180 text-gray-300 shrink-0" />
             </button>
           ))
         )}
       </main>
     </div>
   );
-
   const renderSettings = () => (
     <div className="min-h-screen bg-gray-50">
       <Header title="せってい" leftIcon={<ChevronLeft />} onLeftClick={() => setCurrentScreen(AppScreen.HOME)} />
       <main className="p-6 space-y-6">
         <div className="bg-white rounded-3xl overflow-hidden shadow-sm border border-gray-100">
-          <button 
-            onClick={() => setCurrentScreen(isPro ? AppScreen.PRO_MANAGEMENT : AppScreen.PAYWALL)} 
+          <button
+            onClick={() => setCurrentScreen(isPro ? AppScreen.PRO_MANAGEMENT : AppScreen.PAYWALL)}
             className="w-full p-6 flex items-center justify-between border-b border-gray-50 hover:bg-gray-50 transition-colors text-left"
           >
             <div className="flex items-center gap-4">
@@ -1134,7 +1201,7 @@ const App: React.FC = () => {
             </div>
             <ChevronLeft className="rotate-180 text-gray-300" />
           </button>
-          
+
           <button onClick={() => launchWebPage('https://example.com/terms')} className="w-full p-6 flex items-center justify-between border-b border-gray-50 hover:bg-gray-50 transition-colors text-left">
             <div className="flex items-center gap-4">
               <div className="p-3 bg-blue-50 rounded-2xl"><FileText className="text-blue-500" /></div>
@@ -1151,7 +1218,7 @@ const App: React.FC = () => {
             <ExternalLink className="text-gray-300" size={18} />
           </button>
         </div>
-        
+
         <p className="text-center text-gray-300 text-xs mt-10 font-bold">Version 1.8.0 - 振り返り機能の強化</p>
       </main>
     </div>
@@ -1161,21 +1228,28 @@ const App: React.FC = () => {
     <div className="min-h-screen bg-gray-50 flex flex-col">
       <Header title="Proプランの管理" leftIcon={<ChevronLeft />} onLeftClick={() => setCurrentScreen(AppScreen.SETTINGS)} />
       <main className="flex-1 p-6 space-y-6">
-        <div className="bg-gradient-to-br from-indigo-600 to-blue-700 rounded-[2.5rem] p-8 text-white shadow-xl relative overflow-hidden">
+        <div className="bg-gradient-to-br from-indigo-600 to-blue-700 rounded-[2.5rem] p-8 shadow-xl relative overflow-hidden">
           <Crown className="absolute -top-4 -right-4 w-32 h-32 opacity-10 rotate-12" />
           <div className="relative z-10">
             <div className="flex items-center gap-2 mb-2">
-              <span className="bg-white/20 px-3 py-1 rounded-full text-xs font-black backdrop-blur-md">サブスクリプション</span>
+              <span className="bg-white/20 text-white px-3 py-1 rounded-full text-xs font-black">
+                サブスクリプション
+              </span>
               <Heart size={14} className="fill-red-400 text-red-400" />
             </div>
-            <h2 className="text-3xl font-black mb-6">Proプラン登録中</h2>
+
+            <h2 className="text-3xl font-black mb-6 text-gray-900">Proプラン登録中</h2>
+
             <div className="space-y-4">
-              <div className="bg-white/10 rounded-2xl p-4 backdrop-blur-md border border-white/10">
-                <p className="text-white/60 text-xs uppercase font-black tracking-widest mb-1">現在のプラン</p>
-                <p className="text-lg font-black">月額プラン (¥480/月)</p>
+              <div className="bg-white rounded-2xl p-4 border border-gray-200">
+                <p className="text-gray-500 text-xs uppercase font-black tracking-widest mb-1">
+                  現在のプラン
+                </p>
+                <p className="text-lg font-black text-gray-900">月額プラン (¥480/月)</p>
               </div>
             </div>
           </div>
+
         </div>
 
         <div className="bg-white rounded-[2rem] p-6 shadow-sm border border-gray-100">
@@ -1197,14 +1271,14 @@ const App: React.FC = () => {
         </div>
 
         <div className="space-y-3">
-          <button 
+          <button
             onClick={() => alert('購入情報を確認しました。最新の状態に更新されました。')}
             className="w-full bg-white border-2 border-gray-100 text-gray-600 py-4 rounded-2xl font-black flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
           >
             <RefreshCw size={18} /> 購入の復元
           </button>
-          
-          <button 
+
+          <button
             onClick={() => {
               if (window.confirm('解約手続きのため、ストアの管理画面へ移動しますか？')) {
                 launchWebPage('https://apps.apple.com/account/subscriptions');
@@ -1244,8 +1318,19 @@ const App: React.FC = () => {
         </div>
 
         <div className="space-y-6">
-          <button onClick={() => { setIsPro(true); setCurrentScreen(AppScreen.HOME); }} className="w-full bg-blue-500 text-white py-5 rounded-2xl text-xl font-black shadow-xl shadow-blue-100 hover:bg-blue-600 transition-all active:scale-95">
+          <button
+            onClick={() => { setIsPro(true); setCurrentScreen(AppScreen.HOME); }}
+            className="w-full bg-blue-500 text-white py-5 rounded-2xl text-xl font-black shadow-xl shadow-blue-100 hover:bg-blue-600 transition-all active:scale-95 flex items-center justify-center gap-3"
+          >
+            <Crown className="w-6 h-6" />
             ¥480 / 月 で登録
+          </button>
+
+          <button
+            onClick={() => setCurrentScreen(AppScreen.HOME)}
+            className="w-full bg-white text-gray-500 py-4 rounded-2xl text-base font-black border-2 border-gray-100 hover:border-blue-200 hover:text-blue-500 transition-all active:scale-95"
+          >
+            いまはやめておく
           </button>
 
           <div className="flex flex-col items-center gap-4">
