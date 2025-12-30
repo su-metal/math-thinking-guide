@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getAIProvider } from "@/lib/aiProviders/provider";
+import { estimateLevel } from "@/lib/levelEstimator";
 
 const DEFAULT_ERROR_MESSAGE =
   "AIが問題を読み取れませんでした。明るい場所でもういちど撮ってみてね。";
@@ -30,6 +31,22 @@ export async function POST(req: Request) {
 
   try {
     const result: any = await provider.analyze(imageBase64);
+
+    const problemText =
+      result?.problems?.[0]?.problem_text ??
+      result?.problem_text ??
+      result?.problem ??
+      null;
+    const estimatedMeta = estimateLevel(problemText);
+    const existingMeta = result.meta ?? {};
+    const mergedMeta = { ...estimatedMeta, ...existingMeta };
+
+    const locale = (mergedMeta as any).locale;
+    if (typeof locale !== "string" || locale.trim() === "") {
+      (mergedMeta as any).locale = "ja";
+    }
+
+    result.meta = mergedMeta;
 
     // debug=true のときだけ provider名を付与（型を壊さず最低限）
     if (debug) {
