@@ -1,4 +1,4 @@
-import { GoogleGenAI } from "@google/genai";
+﻿import { GoogleGenAI } from "@google/genai";
 import { AnalysisResult, DrillResult } from "../../types";
 import { AIProvider } from "./provider";
 import {
@@ -22,7 +22,7 @@ import {
  */
 const GEMINI_SIMPLE_MODEL = process.env.GEMINI_SIMPLE_MODEL || "gemini-2.5-flash";
 const GEMINI_COMPLEX_MODEL =
-  process.env.GEMINI_COMPLEX_MODEL || "gemini-3-pro-preview";
+  process.env.GEMINI_COMPLEX_MODEL || "gemini-2.5-flash";
 const GEMINI_ROUTER_MODEL = process.env.GEMINI_ROUTER_MODEL || "gemini-2.5-flash";
 
 // ルーティング用の超小さいスキーマ
