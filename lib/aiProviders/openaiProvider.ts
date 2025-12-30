@@ -4,7 +4,9 @@ import {
   ANALYSIS_PROMPT,
   ANALYSIS_RESPONSE_SCHEMA,
   DRILL_RESPONSE_SCHEMA,
-  appendImageToPrompt,
+  PROBLEM_EXTRACTION_PROMPT,
+  PROBLEM_EXTRACTION_SCHEMA,
+  createControlledAnalysisPrompt,
   createDrillPrompt,
 } from "./prompts";
 
@@ -104,6 +106,32 @@ export class OpenAIProvider implements AIProvider {
     console.log(`[${this.name}] parsed result method_hint`, parsed?.problems?.[0]?.method_hint);
     if (!parsed?.problems?.[0]?.method_hint?.pitch) {
       console.warn(`[${this.name}] method_hint missing in parsed response`);
+    }
+    return parsed;
+  }
+
+  async extractProblemText(imageBase64: string): Promise<string> {
+    const raw = await this.request(PROBLEM_EXTRACTION_PROMPT, PROBLEM_EXTRACTION_SCHEMA, imageBase64);
+    console.log(`[${this.name}] raw model text (extract problem text)`, raw);
+    const parsed = this.parseJson<{ problem_text: string }>(raw, "openai extract problem text");
+    if (!parsed?.problem_text) {
+      throw new Error("問題文の抽出に失敗しました。もう一度試してね。");
+    }
+    return parsed.problem_text.trim();
+  }
+
+  async analyzeWithControls(args: {
+    imageBase64: string;
+    problemText: string;
+    difficulty: "easy" | "normal" | "hard";
+  }): Promise<AnalysisResult> {
+    const prompt = createControlledAnalysisPrompt(args.problemText, args.difficulty);
+    const raw = await this.request(prompt, ANALYSIS_RESPONSE_SCHEMA, args.imageBase64);
+    console.log(`[${this.name}] raw model text (controlled analysis)`, raw);
+    const parsed = this.parseJson<AnalysisResult>(raw, "openai controlled analysis");
+    console.log(`[${this.name}] parsed controlled result method_hint`, parsed?.problems?.[0]?.method_hint);
+    if (!parsed?.problems?.[0]?.method_hint?.pitch) {
+      console.warn(`[${this.name}] method_hint missing in controlled response`);
     }
     return parsed;
   }

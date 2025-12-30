@@ -1,3 +1,5 @@
+import type { Difficulty } from "@/lib/levelEstimator";
+
 export const METHOD_DICT_V1_1 = `{
   "version": "1.1",
   "language": "ja-JP",
@@ -586,4 +588,51 @@ export function appendImageToPrompt(prompt: string, imageBase64: string) {
   if (!imageBase64) return prompt;
   const dataUrl = imageBase64.startsWith("data:") ? imageBase64 : `data:image/jpeg;base64,${imageBase64}`;
   return `${prompt}\n\n[画像データ (base64)]\n${dataUrl}`;
+}
+
+export const PROBLEM_EXTRACTION_PROMPT = `
+画像には算数の問題文が写っています。以下の厳格なルールで、問題文だけを抽出してください。
+
+- 出力は JSON のみ。余計な説明や余白を含めず、指定した構造だけを返す。
+- 出力形式:
+{
+  "problem_text": "画像にある問題文を事実どおりに再構成した文章"
+}
+- 図中や文章中の数値・単位・割合・条件をすべて自然な日本語で記述し、指示語や番号（①など）は具体的な語に置き換えてください。
+- 文章はやさしい語尾で、問いかけや命令口調を避けて客観的に説明する形にしてください。
+`;
+
+export const PROBLEM_EXTRACTION_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    problem_text: { type: "string" },
+  },
+  required: ["problem_text"],
+} as const;
+
+const STEP_COUNT_RULES: Record<Difficulty, string> = {
+  easy: "ステップ数は2〜3。1ステップは1つの着眼点/計算対象に集中し、途中で余計なノイズを入れない。",
+  normal: "ステップ数は3〜5で、前のステップを振り返りながら丁寧に進める。",
+  hard: "ステップ数は5〜7。難しさに応じて細かく分割し、1ステップ1つの計算対象を扱う。",
+};
+
+const VOCABULARY_RULES: Record<Difficulty, string> = {
+  easy: `語彙はやさしく短く。以下の単語は使わない: 最大公約数, 最小公倍数, 比, 割合, 分数, 分母, 分子, 連立, 文字式。`,
+  normal: `基本語（公約数, 面積, あたり, 角度など）は使ってOK。計算式のネタバレになる言い回しは避け、考え方を丁寧に説明する。`,
+  hard: `専門用語は使ってよいが、初出で簡単な補足（例: 「最大公約数(共通の約数のうちいちばん大きな数)」）を添える。`,
+};
+
+export function createControlledAnalysisPrompt(problemText: string, difficulty: Difficulty) {
+  return `${ANALYSIS_PROMPT}
+【制御情報（以下を必ず守る）】
+- 難易度: ${difficulty}
+- ${STEP_COUNT_RULES[difficulty]}
+- ${VOCABULARY_RULES[difficulty]}
+- Separation Rule（1ステップ＝1対象）と前ステップの振り返りルールは継続。
+- 「problem_text」の内容を尊重し、画像内の数値・条件・図表を忠実になぞるよう努める。
+
+【問題文】
+${problemText}
+`;
 }

@@ -30,30 +30,30 @@ export async function POST(req: Request) {
   }
 
   try {
-    const result: any = await provider.analyze(imageBase64);
-
-    const problemText =
-      result?.problems?.[0]?.problem_text ??
-      result?.problem_text ??
-      result?.problem ??
-      null;
+    const problemText = await provider.extractProblemText(imageBase64);
     const estimatedMeta = estimateLevel(problemText);
-    const existingMeta = result.meta ?? {};
-    const mergedMeta = { ...estimatedMeta, ...existingMeta };
 
+    const finalResult: any = await provider.analyzeWithControls({
+      imageBase64,
+      problemText,
+      difficulty: estimatedMeta.difficulty,
+    });
+
+    const existingMeta = finalResult.meta ?? {};
+    const mergedMeta = { ...estimatedMeta, ...existingMeta };
     const locale = (mergedMeta as any).locale;
     if (typeof locale !== "string" || locale.trim() === "") {
       (mergedMeta as any).locale = "ja";
     }
 
-    result.meta = mergedMeta;
+    finalResult.meta = mergedMeta;
 
     // debug=true のときだけ provider名を付与（型を壊さず最低限）
     if (debug) {
-      result._debug = { provider: provider.name };
+      finalResult._debug = { provider: provider.name };
     }
 
-    return NextResponse.json(result);
+    return NextResponse.json(finalResult);
   } catch (error: any) {
     console.error(`[${provider.name}] AI Analysis failed:`, error);
     const message = error?.message;

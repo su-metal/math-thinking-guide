@@ -6,6 +6,9 @@ import {
   DRILL_PROMPT,
   ANALYSIS_RESPONSE_SCHEMA,
   DRILL_RESPONSE_SCHEMA,
+  PROBLEM_EXTRACTION_PROMPT,
+  PROBLEM_EXTRACTION_SCHEMA,
+  createControlledAnalysisPrompt,
   createDrillPrompt,
 } from "./prompts";
 
@@ -19,7 +22,7 @@ import {
  */
 const GEMINI_SIMPLE_MODEL = process.env.GEMINI_SIMPLE_MODEL || "gemini-2.5-flash";
 const GEMINI_COMPLEX_MODEL =
-  process.env.GEMINI_COMPLEX_MODEL || "gemini-3-flash-preview";
+  process.env.GEMINI_COMPLEX_MODEL || "gemini-3-pro-preview";
 const GEMINI_ROUTER_MODEL = process.env.GEMINI_ROUTER_MODEL || "gemini-2.5-flash";
 
 // ルーティング用の超小さいスキーマ
@@ -161,6 +164,67 @@ export class GeminiProvider implements AIProvider {
       console.warn(`[${this.name}] route failed, fallback complex`, e);
       return { route: "complex", confidence: 0, signals: ["route_failed"] };
     }
+  }
+
+  async extractProblemText(imageBase64: string): Promise<string> {
+    this.ensureKey();
+    const inlineImage = imageBase64.split(",")[1] || imageBase64;
+    const mimeType = this.detectMimeType(imageBase64);
+    const extracted = await this.generateContent<{ problem_text: string }>({
+      contents: [
+        { text: PROBLEM_EXTRACTION_PROMPT },
+        {
+          inlineData: {
+            mimeType,
+            data: inlineImage,
+          },
+        },
+      ],
+      schema: PROBLEM_EXTRACTION_SCHEMA as any,
+      context: "extract problem text",
+      model: GEMINI_COMPLEX_MODEL,
+    });
+
+    if (!extracted?.problem_text) {
+      throw new Error("問題文の抽出に失敗しました。もう一度試してね。");
+    }
+
+    return extracted.problem_text.trim();
+  }
+
+  async analyzeWithControls(args: {
+    imageBase64: string;
+    problemText: string;
+    difficulty: "easy" | "normal" | "hard";
+  }): Promise<AnalysisResult> {
+    this.ensureKey();
+    const inlineImage = args.imageBase64.split(",")[1] || args.imageBase64;
+    const mimeType = this.detectMimeType(args.imageBase64);
+    const prompt = createControlledAnalysisPrompt(args.problemText, args.difficulty);
+
+    const rawResult = await this.generateContent<AnalysisResult>({
+      contents: [
+        { text: prompt },
+        {
+          inlineData: {
+            mimeType,
+            data: inlineImage,
+          },
+        },
+      ],
+      schema: ANALYSIS_RESPONSE_SCHEMA,
+      context: `controlled analysis difficulty=${args.difficulty}`,
+      model: GEMINI_COMPLEX_MODEL,
+    });
+
+    console.log(`[${this.name}] controlled difficulty=${args.difficulty} result`, rawResult);
+    console.log(`[${this.name}] parsed result method_hint`, rawResult?.problems?.[0]?.method_hint);
+
+    if (!rawResult?.problems?.[0]?.method_hint?.pitch) {
+      console.warn(`[${this.name}] method_hint missing in controlled response`);
+    }
+
+    return rawResult;
   }
 
   async analyze(imageBase64: string): Promise<AnalysisResult> {
