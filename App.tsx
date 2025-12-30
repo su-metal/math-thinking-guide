@@ -545,8 +545,9 @@ const App: React.FC = () => {
     setCurrentScreen(AppScreen.LOADING);
     setShowFinalAnswer(false);
     try {
-      const result = await analyzeMathProblem(img);
-      setAnalysisResult(result);
+    const result = await analyzeMathProblem(img);
+    console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
+    setAnalysisResult(result);
       setCurrentProblemIndex(0);
       setCurrentStepIndex(0);
 
@@ -564,6 +565,7 @@ const App: React.FC = () => {
         image: img,
         result: result
       };
+      console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
       saveHistory(historyItem);
       decreaseTries();
     } catch (err: any) {
@@ -985,9 +987,19 @@ const App: React.FC = () => {
 
               {currentStepIndex === 0 && (
                 <div className="mb-4">
+                  {(() => {
+                    console.log("[debug] problem.id", problem?.id);
+                    console.log("[debug] problem.method_hint", problem?.method_hint);
+                    console.log("[debug] typeof pitch", typeof problem?.method_hint?.pitch);
+                    console.log("[debug] keys(problem)", problem ? Object.keys(problem) : null);
+                    return null;
+                  })()}
                   <ThoughtBlockYellow
-                    title="スパッキーの考え方"
-                    text="まずは問題文に書かれている『わかっていること』と『知りたいこと』を分けてみよう。いまの数字は、どんな見方にそろえると比べやすいかな？"
+                    title={problem.method_hint?.label ? `スパッキーの考え方（${problem.method_hint.label}）` : "スパッキーの考え方"}
+                    text={
+                      problem.method_hint?.pitch ??
+                      "まずは問題文に書かれている『わかっていること』と『知りたいこと』を分けてみよう。数字は、何を表している情報かな？"
+                    }
                   />
                 </div>
               )}

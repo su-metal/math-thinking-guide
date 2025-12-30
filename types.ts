@@ -7,11 +7,17 @@ export interface MathStep {
   is_final_answer?: boolean;
 }
 
+export type MethodHint = {
+  label?: string;
+  pitch: string;
+};
+
 export interface MathProblem {
   id: string;
   problem_text: string;
   steps: MathStep[];
   final_answer: string;
+  method_hint?: MethodHint;
 }
 
 export interface AnalysisResult {
