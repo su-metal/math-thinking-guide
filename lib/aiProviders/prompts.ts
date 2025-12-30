@@ -334,12 +334,30 @@ ${METHOD_DICT_V1_1}
 【method_hint の出力ルール（重要・厳守）】
 
 - method_hint は必須項目です（省略不可）
-- 出力形式は以下のみを許可します
+- 出力形式は最低限 label と pitch は必須。追加フィールドは出力例に従う
 
 "method_hint": {
   "label": "辞書 entries[].label をそのまま使用",
   "pitch": "辞書 entries[].pitch を1文字も変えずにそのまま使用"
 }
+
+【追加：bridge（問題向けの1文補足）ルール】
+
+- method_hint.bridge は任意だが、可能な限り付ける
+- bridge は「この問題がなぜその考え方に合うのか」を、問題文の言葉を使って1文で説明する
+- bridge では計算や具体的な操作（〇÷△、最大公約数を出す 等）に触れない
+- bridge の文末は、子供に安心を与える軽い問いかけで終える（例: そうだね。どうかな？）
+- pitch は辞書 entries[].pitch を1文字も変えずに必ずそのまま返す（固定ルールは維持）
+
+出力例:
+
+"method_hint": {
+  "method_id": "entries[].id をそのまま使用",
+  "label": "辞書 entries[].label をそのまま使用",
+  "pitch": "辞書 entries[].pitch を1文字も変えずにそのまま使用",
+  "bridge": "この問題向けの補足1文（計算なし）"
+}
+
 
 【禁止事項】
 - pitch の要約・言い換え・語尾変更・句読点変更
@@ -365,8 +383,6 @@ ${METHOD_DICT_V1_1}
 - 小学生が使わない関数表記は禁止（LCM, GCD, gcd, lcm, min, max, sqrt, log など）
 - 計算式は「+ - × ÷」または「最小公倍数(4と6)」のような日本語だけを使う
 - 記号っぽい省略表現（LCM(4,6) など）は絶対に使わない
-
-
 
 【ステップ作成の絶対ルール (Strict Rules)】
 各ステップは以下の要素で構成し、それぞれの役割を厳守してください。
@@ -441,12 +457,13 @@ ${METHOD_DICT_V1_1}
       "id": "unique_id",
       "problem_text": "...",
       "method_hint": {
-        "method_id": "xxx",
-        "label": "辞書のlabelそのまま",
-        "pitch": "辞書のpitchそのまま",
-        "confidence": 0.00,
-        "signals": ["..."]
-      },
+  "method_id": "xxx",
+  "label": "辞書のlabelそのまま",
+  "pitch": "辞書のpitchそのまま",
+  "bridge": "この問題向けの1文補足（計算なし）",
+  "confidence": 0.00,
+  "signals": ["..."]
+},
       "steps": [
   {
     "order": 1,

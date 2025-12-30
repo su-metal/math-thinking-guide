@@ -20,10 +20,13 @@ export interface MathStep {
   is_final_answer?: boolean;
 }
 
-
 export type MethodHint = {
-  label?: string;
-  pitch: string;
+  method_id?: string;  // 任意
+  label?: string;      // 辞書のlabelそのまま（任意）
+  pitch: string;       // 辞書のpitchそのまま（必須）
+  bridge?: string;     // LLMが作る「この問題向けの一文補足」（任意）
+  confidence?: number; // 任意
+  signals?: string[];  // 任意
 };
 
 export interface MathProblem {

@@ -879,11 +879,58 @@ const App: React.FC = () => {
                     <AITeacher mood="PRAISING" className="scale-125" />
                   </div>
                   <h3 className="text-xl font-black text-gray-400 mb-2 uppercase">さいごの答え</h3>
+
                   <div className="bg-green-50 p-6 rounded-[2rem] border-4 border-green-200 mb-8 relative">
                     <Trophy className="absolute -top-6 -right-6 text-yellow-400 rotate-12" size={48} />
-                    <p className="text-3xl font-black text-green-700">
-                      {problem.final_answer}
-                    </p>
+
+                    {(() => {
+                      const raw = (problem.final_answer ?? "").trim();
+
+                      // 1) まず「答え：」を抽出（あれば）
+                      const answerMatch = raw.match(/^答え：\s*(.*?)(?:\n|$)/);
+                      const answerLine = answerMatch ? answerMatch[1].trim() : "";
+
+                      // 2) 「【理由】」以降を抽出（あれば）
+                      const reasonSplit = raw.split("【理由】");
+                      const reasonText = reasonSplit.length >= 2 ? reasonSplit.slice(1).join("【理由】").trim() : "";
+
+                      // 3) どちらも取れないケースはそのまま段落化
+                      const fallbackLines = raw
+                        .replace(/^答え：\s*/g, "")
+                        .split(/\n+/)
+                        .map((s) => s.trim())
+                        .filter(Boolean);
+
+                      return (
+                        <div className="space-y-4">
+                          {/* タイトル（答え） */}
+                          <div className="flex items-center gap-3">
+                            <span className="inline-flex items-center px-3 py-1 rounded-full bg-green-200 text-green-800 text-xs font-black">
+                              さいごの答え
+                            </span>
+                            <p className="text-2xl sm:text-3xl font-black text-green-800">
+                              {answerLine ? `答え：${answerLine}` : "答え"}
+                            </p>
+                          </div>
+
+                          {/* 理由（段落表示） */}
+                          {reasonText ? (
+                            <div className="bg-white/60 rounded-2xl p-4 border border-green-200">
+                              <p className="text-sm font-black text-green-700 mb-2">理由</p>
+                              <p className="text-[15px] sm:text-base font-bold text-green-900 leading-7 whitespace-pre-wrap">
+                                {reasonText}
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="bg-white/60 rounded-2xl p-4 border border-green-200">
+                              <p className="text-[15px] sm:text-base font-bold text-green-900 leading-7 whitespace-pre-wrap">
+                                {fallbackLines.join("\n\n")}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   <div className="w-full space-y-3">
@@ -940,6 +987,14 @@ const App: React.FC = () => {
     const currentStep = problem.steps[currentStepIndex];
     const prevStep = currentStepIndex > 0 ? problem.steps[currentStepIndex - 1] : null;
     const isLastStep = currentStepIndex === problem.steps.length - 1;
+    const mh = problem.method_hint;
+
+    const thoughtText =
+      (mh?.bridge && mh.bridge.trim().length > 0)
+        ? `${mh.bridge}\n\n${mh.pitch}`
+        : (mh?.pitch && mh.pitch.trim().length > 0)
+          ? mh.pitch
+          : "まずは問題文に書かれている『わかっていること』と『知りたいこと』を分けてみよう。";
 
     return (
       <div className="min-h-screen bg-gray-50 flex flex-col">
@@ -1055,13 +1110,14 @@ const App: React.FC = () => {
                     console.log("[debug] keys(problem)", problem ? Object.keys(problem) : null);
                     return null;
                   })()}
-                  <ThoughtBlockYellow
-                    title={problem.method_hint?.label ? `スパッキーの考え方（${problem.method_hint.label}）` : "スパッキーの考え方"}
-                    text={
-                      problem.method_hint?.pitch ??
-                      "まずは問題文に書かれている『わかっていること』と『知りたいこと』を分けてみよう。数字は、何を表している情報かな？"
-                    }
-                  />
+                  {currentStepIndex === 0 && (
+                    <div className="mb-4">
+                      <ThoughtBlockYellow
+                        title={`スパッキーの考え方${mh?.label ? `（${mh.label}）` : ""}`}
+                        text={thoughtText}
+                      />
+                    </div>
+                  )}
                 </div>
               )}
 
