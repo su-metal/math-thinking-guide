@@ -26,6 +26,15 @@ app
       route.ts
 diagnostics
   tailwind-report.md
+lib
+  aiProviders
+    geminiProvider.ts
+    openaiProvider.ts
+    prompts.ts
+    provider.ts
+  supabase
+    admin.ts
+    server.ts
 services
   geminiService.ts
 tools
