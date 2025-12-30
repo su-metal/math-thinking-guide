@@ -460,6 +460,12 @@ const App: React.FC = () => {
   const [showLimitReachedModal, setShowLimitReachedModal] = useState(false);
   const [isLoadingDrills, setIsLoadingDrills] = useState(false);
   const [showFullImage, setShowFullImage] = useState(false);
+  const [showPrevCalc, setShowPrevCalc] = useState(false);
+
+  useEffect(() => {
+    setShowPrevCalc(false);
+  }, [currentStepIndex]);
+
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -545,9 +551,9 @@ const App: React.FC = () => {
     setCurrentScreen(AppScreen.LOADING);
     setShowFinalAnswer(false);
     try {
-    const result = await analyzeMathProblem(img);
-    console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
-    setAnalysisResult(result);
+      const result = await analyzeMathProblem(img);
+      console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
+      setAnalysisResult(result);
       setCurrentProblemIndex(0);
       setCurrentStepIndex(0);
 
@@ -976,8 +982,63 @@ const App: React.FC = () => {
               {prevStep && (
                 <div className="mb-6 animate-in fade-in slide-in-from-top-4 duration-500">
                   <div className="bg-blue-50/50 rounded-2xl p-4 border border-blue-100 relative">
-                    <p className="text-[10px] font-black text-blue-400 uppercase mb-1">まえのステップの答え</p>
-                    <p className="text-sm font-black text-blue-700 leading-relaxed">{prevStep.solution}</p>
+                    <p className="text-[10px] font-black text-blue-400 uppercase mb-1">
+                      まえのステップのふりかえり
+                    </p>
+
+                    {/* 会話の説明（常時表示） */}
+                    <p className="text-sm font-black text-blue-700 leading-relaxed">
+                      {prevStep.solution}
+                    </p>
+
+                    {/* 途中計算（任意表示） */}
+                    {(() => {
+                      const calc = prevStep.calculation;
+                      const expr =
+                        typeof calc?.expression === "string" ? calc.expression.trim() : "";
+
+                      const hasValidCalc =
+                        !!calc &&
+                        expr !== "" &&
+                        expr.toUpperCase() !== "NULL" &&
+                        typeof calc.result === "number" &&
+                        !Number.isNaN(calc.result);
+
+                      if (!hasValidCalc) return null;
+
+                      return (
+                        <div className="mt-3">
+                          <button
+                            type="button"
+                            onClick={() => setShowPrevCalc(v => !v)}
+                            className="text-xs font-black text-blue-700 underline underline-offset-2 active:scale-95"
+                          >
+                            {showPrevCalc ? "計算をとじる" : "計算をみる"}
+                          </button>
+
+                          {showPrevCalc && (
+                            <div className="mt-2 bg-white/80 rounded-2xl p-3 border border-blue-100">
+                              <p className="text-[10px] font-black text-blue-400 uppercase mb-1">
+                                途中の計算
+                              </p>
+                              <p className="text-sm font-black text-blue-800">
+                                式 {calc.expression}
+                              </p>
+                              <p className="text-sm font-black text-blue-800 mt-1">
+                                結果 {calc.result}
+                                {calc.unit ? ` ${calc.unit}` : ""}
+                              </p>
+                              {calc.note && (
+                                <p className="text-xs font-black text-blue-600 mt-2">
+                                  {calc.note}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
                     <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 bg-white rounded-full p-1 border border-gray-100 shadow-sm">
                       <ArrowDown size={14} className="text-blue-400" />
                     </div>

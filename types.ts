@@ -1,11 +1,25 @@
 
+export type StepCalculation = {
+  expression: string; // 例: "3600 ÷ 15"
+  result: number;     // 例: 240
+  unit?: string;      // 例: "人/平方キロメートル"
+  note?: string;      // 例: "1平方キロメートルあたりの人数"
+};
+
 export interface MathStep {
   order: number;
   hint: string;     // そのステップで考えること（ヒント）
-  solution: string; // そのステップの具体的な式や計算結果（次のステップで表示）
+
+  // そのステップの説明文（会話調）。原則「結論の断定」は避け、意味づけや確認に使う
+  solution: string;
+
+  // 任意で見られる途中計算（表示トグル用）
+  calculation?: StepCalculation;
+
   hint_icon?: string;
   is_final_answer?: boolean;
 }
+
 
 export type MethodHint = {
   label?: string;
