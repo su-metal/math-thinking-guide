@@ -21,6 +21,38 @@ const hasRepeatingRun = (items: string[], minRun: number) => {
   return false;
 };
 
+const normalizeForSimilarity = (text: string) =>
+  text
+    .replace(/[\s\u3000]+/g, "")
+    .replace(/[.,!?。、！？「」『』（）()]/g, "")
+    .toLowerCase();
+
+const bigrams = (text: string) => {
+  const grams = new Set<string>();
+  if (text.length < 2) return grams;
+  for (let i = 0; i < text.length - 1; i += 1) {
+    grams.add(text.slice(i, i + 2));
+  }
+  return grams;
+};
+
+const jaccard = (a: Set<string>, b: Set<string>) => {
+  if (a.size === 0 && b.size === 0) return 1;
+  let intersection = 0;
+  for (const item of a) {
+    if (b.has(item)) intersection += 1;
+  }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+};
+
+const hasHighSimilarity = (a: string, b: string, threshold = 0.75) => {
+  const na = normalizeForSimilarity(a);
+  const nb = normalizeForSimilarity(b);
+  if (na.length < 4 || nb.length < 4) return false;
+  return jaccard(bigrams(na), bigrams(nb)) >= threshold;
+};
+
 export function verifySteps(steps: MathStep[]): VerificationResult {
   const issues: string[] = [];
   if (!Array.isArray(steps) || steps.length === 0) {
@@ -57,6 +89,12 @@ export function verifySteps(steps: MathStep[]): VerificationResult {
   }
   if (solutions.length > 0 && hasRepeatingRun(solutions, 3)) {
     issues.push("repetition_solution");
+  }
+  for (let i = 1; i < hints.length; i += 1) {
+    if (hasHighSimilarity(hints[i - 1], hints[i]) || hasHighSimilarity(solutions[i - 1], solutions[i])) {
+      issues.push("duplicate_step_similarity");
+      break;
+    }
   }
 
   return { ok: issues.length === 0, issues };

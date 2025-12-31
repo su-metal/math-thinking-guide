@@ -10,8 +10,10 @@ export type LevelSignals = {
   has_lcm: boolean;
   has_geometry: boolean;
   has_graph: boolean;
+  has_table: boolean; // 追加
   num_conditions: number;
 };
+
 
 export interface LevelMeta {
   difficulty: Difficulty;
@@ -19,6 +21,8 @@ export interface LevelMeta {
   confidence: number;
   signals: LevelSignals;
 }
+
+
 
 const conditionKeywords = ["ただし", "もし", "場合", "とき"];
 
@@ -60,7 +64,9 @@ const geometryKeywords = [
   "底辺",
   "高さ",
 ];
-const graphKeywords = ["グラフ", "表", "棒グラフ", "折れ線"];
+const graphKeywords = ["グラフ", "棒グラフ", "折れ線", "円グラフ", "散布図", "ヒストグラム", "x軸", "y軸"];
+const tableKeywords = ["表"]; // 追加（必要なら "一覧表" なども）
+
 
 const fallbackSignals: LevelSignals = {
   has_fraction: false,
@@ -72,8 +78,10 @@ const fallbackSignals: LevelSignals = {
   has_lcm: false,
   has_geometry: false,
   has_graph: false,
+  has_table: false, // 追加
   num_conditions: 0,
 };
+
 
 const booleanSignalTagMap: Array<[Exclude<keyof LevelSignals, "num_conditions">, string]> = [
   ["has_fraction", "fraction"],
@@ -85,9 +93,11 @@ const booleanSignalTagMap: Array<[Exclude<keyof LevelSignals, "num_conditions">,
   ["has_lcm", "lcm"],
   ["has_geometry", "geometry"],
   ["has_graph", "graph"],
+  ["has_table", "table"], // 追加
 ];
 
-const hardTags = new Set(["ratio", "percentage", "fraction", "lcm"]);
+
+const hardTags = new Set(["percentage", "fraction", "lcm"]);
 const normalTags = new Set(["gcd", "area", "unit_rate", "geometry"]);
 
 const containsKeyword = (text: string, keywords: string[]): boolean =>
@@ -131,28 +141,27 @@ export function estimateLevel(problemText: string | null | undefined): LevelMeta
   }
 
   const signals: LevelSignals = {
-    has_fraction:
-      containsKeyword(normalized, fractionKeywords) || fractionRegex.test(normalized),
-    has_ratio: containsKeyword(normalized, ratioKeywords) || ratioRegex.test(normalized),
-    has_percentage:
-      containsKeyword(normalized, percentageKeywords) || percentageRegex.test(normalized),
-    has_area: containsKeyword(normalized, areaKeywords) || areaRegex.test(normalized),
-    has_unit_rate: containsKeyword(normalized, unitRateKeywords),
-    has_gcd: (() => {
-      const hasBase = normalized.includes(gcdComboBaseKeyword);
-      const hasPair = gcdComboPairKeywords.some((fragment) => normalized.includes(fragment));
-      const hasCombo = hasBase && hasPair;
-      const hasKeywordMatch = containsKeyword(normalized, gcdKeywordMatchList);
-      return hasCombo || hasKeywordMatch;
-    })(),
-    has_lcm: containsKeyword(normalized, lcmKeywords),
-    has_geometry: containsKeyword(normalized, geometryKeywords),
-    has_graph: containsKeyword(normalized, graphKeywords),
-    num_conditions: conditionKeywords.reduce(
-      (total, keyword) => total + countOccurrences(normalized, keyword),
-      0
-    ),
-  };
+  has_fraction: containsKeyword(normalized, fractionKeywords) || fractionRegex.test(normalized),
+  has_ratio: containsKeyword(normalized, ratioKeywords) || ratioRegex.test(normalized),
+  has_percentage: containsKeyword(normalized, percentageKeywords) || percentageRegex.test(normalized),
+  has_area: containsKeyword(normalized, areaKeywords) || areaRegex.test(normalized),
+  has_unit_rate: containsKeyword(normalized, unitRateKeywords),
+  has_gcd: (() => {
+    const hasBase = normalized.includes(gcdComboBaseKeyword);
+    const hasPair = gcdComboPairKeywords.some((fragment) => normalized.includes(fragment));
+    const hasCombo = hasBase && hasPair;
+    const hasKeywordMatch = containsKeyword(normalized, gcdKeywordMatchList);
+    return hasCombo || hasKeywordMatch;
+  })(),
+  has_lcm: containsKeyword(normalized, lcmKeywords),
+  has_geometry: containsKeyword(normalized, geometryKeywords),
+  has_graph: containsKeyword(normalized, graphKeywords),
+  has_table: containsKeyword(normalized, tableKeywords), // 追加
+  num_conditions: conditionKeywords.reduce(
+    (total, keyword) => total + countOccurrences(normalized, keyword),
+    0
+  ),
+};
 
   const tags = booleanSignalTagMap.reduce<string[]>((acc, [signalKey, tag]) => {
     if (signals[signalKey]) {
@@ -170,8 +179,15 @@ export function estimateLevel(problemText: string | null | undefined): LevelMeta
     0.35 + 0.12 * signalTrueCount + 0.03 * Math.min(signals.num_conditions, 5);
   const confidence = clampConfidence(rawConfidence);
 
+  const ratioEscalatesToHard =
+    signals.has_ratio &&
+    (signals.has_percentage ||
+      signals.has_fraction ||
+      signals.has_lcm ||
+      signals.num_conditions >= 2);
+
   const hasHardSignal =
-    signals.has_ratio ||
+    ratioEscalatesToHard ||
     signals.has_percentage ||
     signals.has_fraction ||
     signals.has_lcm ||

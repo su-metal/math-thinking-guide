@@ -41,9 +41,12 @@ const GEMINI_MAX_OUTPUT_TOKENS = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS ?? 
 
 const TIMEOUT_PLAN_MS = 10_000;
 const TIMEOUT_HEADER_MS = 25_000;
-const TIMEOUT_STEPS_MS = 25_000;
+const TIMEOUT_STEPS_MS = 40_000;
+const TIMEOUT_STEPS_TOTAL_MS = 25_000;
+const TIMEOUT_TOTAL_MS = 35_000;
 const TIMEOUT_FULL_MS = 30_000;
 const MAX_RETRIES = 2;
+const MAX_STEPS_NON_HARD = 5;
 
 // ルーティング用の超小さいスキーマ
 const ROUTE_SCHEMA = {
@@ -237,127 +240,223 @@ export class GeminiProvider implements AIProvider {
     difficulty: "easy" | "normal" | "hard";
   }): Promise<AnalysisResult> {
     this.ensureKey();
+    const totalStart = Date.now();
     const inlineImage = args.imageBase64.split(",")[1] || args.imageBase64;
     const mimeType = this.detectMimeType(args.imageBase64);
     const debugInfo: Record<string, unknown> = {
+      provider: this.name,
       headerTimeoutMs: TIMEOUT_HEADER_MS,
       headerAttempts: 0,
       stepsTimeoutMs: TIMEOUT_STEPS_MS,
       stepsChunkInputSize: 0,
       stepsChunkHistory: [] as number[],
+      chunkHistory: [] as number[],
+      modelsTried: [] as string[],
+      stepsEscalated: false,
+    };
+    const pushModelTried = (model: string) => {
+      const list = debugInfo.modelsTried as string[];
+      if (list.length === 0 || list[list.length - 1] !== model) {
+        list.push(model);
+      }
     };
 
     let lastError: unknown;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
-      const escalated = args.difficulty === "hard" || attempt > 0;
-      const modelToUse = escalated ? GEMINI_PRO_MODEL : GEMINI_COMPLEX_MODEL;
+      const wantsEscalation = args.difficulty === "hard" || attempt > 0;
+      const modelToUse = wantsEscalation ? GEMINI_PRO_MODEL : GEMINI_COMPLEX_MODEL;
+      const escalated = modelToUse !== GEMINI_COMPLEX_MODEL;
       debugInfo.escalated = escalated;
       debugInfo.retries = attempt;
       debugInfo.model = modelToUse;
+      pushModelTried(modelToUse);
 
       try {
-        const planPrompt = createAnalysisPlanPrompt(args.problemText, args.difficulty);
-        const planResult = await this.generateContent<{ step_count: number; step_titles: string[] }>({
-          contents: [{ text: planPrompt }],
-          schema: ANALYSIS_PLAN_SCHEMA,
-          context: "analysis plan",
-          model: modelToUse,
-          timeoutMs: TIMEOUT_PLAN_MS,
-        });
+        const totalElapsed = () => Date.now() - totalStart;
+        const checkTotalTimeout = () => {
+          if (totalElapsed() > TIMEOUT_TOTAL_MS) {
+            (debugInfo as any).fallbackReason = "total_timeout";
+            return true;
+          }
+          return false;
+        };
 
-        const stepCount = Math.max(1, Number(planResult?.step_count || 0));
-        const stepTitlesRaw = Array.isArray(planResult?.step_titles) ? planResult.step_titles : [];
-        const stepTitles = stepTitlesRaw.filter((title) => typeof title === "string");
-        const normalizedCount = Math.min(stepCount, stepTitles.length || stepCount);
-        const effectiveTitles =
-          stepTitles.length >= normalizedCount
-            ? stepTitles.slice(0, normalizedCount)
-            : Array.from({ length: normalizedCount }, (_, idx) => `ステップ${idx + 1}`);
+        let effectiveTitles: string[] = [];
+        if (args.difficulty === "hard") {
+          if (checkTotalTimeout()) {
+            effectiveTitles = [];
+          } else {
+            const planPrompt = createAnalysisPlanPrompt(args.problemText, args.difficulty);
+            const planResult = await this.generateContent<{ step_count: number; step_titles: string[] }>({
+              contents: [{ text: planPrompt }],
+              schema: ANALYSIS_PLAN_SCHEMA,
+              context: "analysis plan",
+              model: modelToUse,
+              timeoutMs: TIMEOUT_PLAN_MS,
+            });
+
+            const stepCount = Math.max(1, Number(planResult?.step_count || 0));
+            const stepTitlesRaw = Array.isArray(planResult?.step_titles) ? planResult.step_titles : [];
+            const stepTitles = stepTitlesRaw.filter((title) => typeof title === "string");
+            const normalizedCount = Math.min(stepCount, stepTitles.length || stepCount);
+            effectiveTitles =
+              stepTitles.length >= normalizedCount
+                ? stepTitles.slice(0, normalizedCount)
+                : Array.from({ length: normalizedCount }, (_, idx) => `ステップ${idx + 1}`);
+          }
+        } else {
+          effectiveTitles = [];
+        }
 
         let headerResult:
           | { method_hint: { label: string; pitch: string }; final_answer: string }
           | null = null;
-        try {
-          debugInfo.headerAttempts = Number(debugInfo.headerAttempts) + 1;
+        if (!checkTotalTimeout()) {
           const headerPrompt = createAnalysisHeaderPrompt({
             problemText: args.problemText,
             difficulty: args.difficulty,
             stepTitles: effectiveTitles,
           });
           debugInfo.headerInputChars = headerPrompt.length;
-          headerResult = await this.generateContent<{
-            method_hint: { label: string; pitch: string };
-            final_answer: string;
-          }>({
-            contents: [{ text: headerPrompt }],
-            schema: ANALYSIS_HEADER_SCHEMA,
-            context: "analysis header",
-            model: modelToUse,
-            timeoutMs: TIMEOUT_HEADER_MS,
-          });
-        } catch (headerError) {
-          console.warn(`[${this.name}] header generation failed, fallback to single-shot`, headerError);
-          headerResult = null;
+          const headerModels = [GEMINI_SIMPLE_MODEL, GEMINI_COMPLEX_MODEL];
+          for (const headerModel of headerModels) {
+            try {
+              debugInfo.headerAttempts = Number(debugInfo.headerAttempts) + 1;
+              pushModelTried(headerModel);
+              headerResult = await this.generateContent<{
+                method_hint: { label: string; pitch: string };
+                final_answer: string;
+              }>({
+                contents: [{ text: headerPrompt }],
+                schema: ANALYSIS_HEADER_SCHEMA,
+                context: "analysis header",
+                model: headerModel,
+                timeoutMs: TIMEOUT_HEADER_MS,
+              });
+              break;
+            } catch (headerError) {
+              headerResult = null;
+              if (headerModel === GEMINI_COMPLEX_MODEL) {
+                console.warn(`[${this.name}] header generation failed, fallback to single-shot`, headerError);
+              }
+            }
+          }
         }
 
         let chunkSize = 4;
+        const stepsStart = Date.now();
+        const stepsModelInitial = GEMINI_SIMPLE_MODEL;
+        let stepsModelOverride: string | null = null;
+        let stepsEscalated = false;
         let steps: AnalysisResult["problems"][number]["steps"] = [];
-        while (chunkSize >= 1) {
-          try {
-            (debugInfo.stepsChunkHistory as number[]).push(chunkSize);
-            const collected: AnalysisResult["problems"][number]["steps"] = [];
-            for (let i = 0; i < effectiveTitles.length; i += chunkSize) {
-              const slice = effectiveTitles.slice(i, i + chunkSize);
-              const startOrder = i + 1;
-              const endOrder = startOrder + slice.length - 1;
-              const chunkPrompt = createStepsChunkPrompt({
-                problemText: args.problemText,
-                difficulty: args.difficulty,
-                stepTitles: slice,
-                startOrder,
-                endOrder,
-              });
-              debugInfo.stepsChunkInputSize = chunkPrompt.length;
-
-              const chunkResult = await this.generateContent<{ steps: AnalysisResult["problems"][number]["steps"] }>({
-                contents: [{ text: chunkPrompt }],
-                schema: ANALYSIS_STEPS_CHUNK_SCHEMA,
-                context: `analysis steps ${startOrder}-${endOrder}`,
-                model: modelToUse,
-                timeoutMs: TIMEOUT_STEPS_MS,
-              });
-
-              const chunkSteps = Array.isArray(chunkResult?.steps) ? chunkResult.steps : [];
-              const verification = verifySteps(chunkSteps);
-              if (!verification.ok) {
-                const err = new Error(`chunk_verify_failed:${verification.issues.join(",")}`);
-                (debugInfo as any).fallbackReason = "verify_failed";
-                throw err;
+        debugInfo.stepsModelInitial = stepsModelInitial;
+        const totalSteps = effectiveTitles.length > 0 ? effectiveTitles.length : MAX_STEPS_NON_HARD;
+        let stepsRetryUsed = false;
+        const buildStepsOnce = async (): Promise<AnalysisResult["problems"][number]["steps"] | null> => {
+          chunkSize = 4;
+          while (chunkSize >= 1) {
+            try {
+              if (checkTotalTimeout()) {
+                return null;
               }
-              collected.push(...chunkSteps);
+              const elapsedSteps = Date.now() - stepsStart;
+              if (elapsedSteps > TIMEOUT_STEPS_TOTAL_MS) {
+                (debugInfo as any).fallbackReason = "steps_total_timeout";
+                return null;
+              }
+              (debugInfo.stepsChunkHistory as number[]).push(chunkSize);
+              (debugInfo.chunkHistory as number[]).push(chunkSize);
+              const collected: AnalysisResult["problems"][number]["steps"] = [];
+              for (let i = 0; i < totalSteps; i += chunkSize) {
+                const slice =
+                  effectiveTitles.length > 0
+                    ? effectiveTitles.slice(i, i + chunkSize)
+                    : [];
+                const startOrder = i + 1;
+                const currentCount = Math.min(chunkSize, totalSteps - i);
+                const endOrder = startOrder + currentCount - 1;
+                const chunkPrompt = createStepsChunkPrompt({
+                  problemText: args.problemText,
+                  difficulty: args.difficulty,
+                  stepTitles: slice,
+                  startOrder,
+                  endOrder,
+                });
+                debugInfo.stepsChunkInputSize = chunkPrompt.length;
+                const stepsModelToUse = stepsModelOverride ?? stepsModelInitial;
+                pushModelTried(stepsModelToUse);
+
+                const chunkResult = await this.generateContent<{ steps: AnalysisResult["problems"][number]["steps"] }>({
+                  contents: [{ text: chunkPrompt }],
+                  schema: ANALYSIS_STEPS_CHUNK_SCHEMA,
+                  context: `analysis steps ${startOrder}-${endOrder}`,
+                  model: stepsModelToUse,
+                  timeoutMs: TIMEOUT_STEPS_MS,
+                });
+
+                const chunkSteps = Array.isArray(chunkResult?.steps) ? chunkResult.steps : [];
+                const verification = verifySteps(chunkSteps);
+                if (!verification.ok) {
+                  (debugInfo as any).fallbackReason = "verify_failed";
+                  (debugInfo as any).verifyIssuesCount = verification.issues.length;
+                  (debugInfo as any).verifyIssuesTop3 = verification.issues.slice(0, 3);
+                  const err = new Error(`chunk_verify_failed:${verification.issues.join(",")}`);
+                  throw err;
+                }
+                collected.push(...chunkSteps);
+              }
+              normalizeStepOrders(collected, 1);
+              const fullVerification = verifySteps(collected);
+              if (!fullVerification.ok) {
+                (debugInfo as any).fallbackReason = "verify_failed";
+                (debugInfo as any).verifyIssuesCount = fullVerification.issues.length;
+                (debugInfo as any).verifyIssuesTop3 = fullVerification.issues.slice(0, 3);
+                if (!stepsRetryUsed && fullVerification.issues.includes("duplicate_step_similarity")) {
+                  stepsRetryUsed = true;
+                  return null;
+                }
+                return null;
+              }
+              debugInfo.chunkSize = chunkSize;
+              debugInfo.stepsEscalated = stepsEscalated;
+              debugInfo.stepsModelFinal = stepsModelOverride ?? stepsModelInitial;
+              return collected;
+            } catch (chunkError) {
+              const msg = String((chunkError as Error)?.message || "");
+              const isStepsTimeout = msg.includes("Timeout:") && msg.includes("analysis steps");
+              if (isStepsTimeout) {
+                (debugInfo as any).fallbackReason = "steps_chunk_timeout";
+              } else if (msg.includes("JSON") || msg.includes("parse")) {
+                (debugInfo as any).fallbackReason = "json_parse_failed";
+              } else if (!(debugInfo as any).fallbackReason) {
+                (debugInfo as any).fallbackReason = "steps_chunk_failed";
+              }
+              if (chunkSize === 1 && isStepsTimeout && !stepsEscalated) {
+                stepsEscalated = true;
+                stepsModelOverride = GEMINI_COMPLEX_MODEL;
+                (debugInfo as any).stepsEscalated = true;
+                console.warn(`[${this.name}] steps chunk timeout at size=1; retrying with steps escalated model`);
+                continue;
+              }
+              console.warn(`[${this.name}] chunk generation failed, retrying with smaller chunk`, chunkError);
+              chunkSize = chunkSize === 4 ? 2 : chunkSize === 2 ? 1 : 0;
             }
-            normalizeStepOrders(collected, 1);
-            steps = collected;
-            debugInfo.chunkSize = chunkSize;
-            break;
-          } catch (chunkError) {
-            const msg = String((chunkError as Error)?.message || "");
-            if (msg.includes("Timeout")) {
-              (debugInfo as any).fallbackReason = "steps_chunk_timeout";
-            } else if (msg.includes("JSON") || msg.includes("parse")) {
-              (debugInfo as any).fallbackReason = "json_parse_failed";
-            } else if (!(debugInfo as any).fallbackReason) {
-              (debugInfo as any).fallbackReason = "steps_chunk_failed";
-            }
-            console.warn(`[${this.name}] chunk generation failed, retrying with smaller chunk`, chunkError);
-            chunkSize = chunkSize === 4 ? 2 : chunkSize === 2 ? 1 : 0;
           }
+          return null;
+        };
+        const stepsFirst = await buildStepsOnce();
+        steps = stepsFirst ?? [];
+        if (!steps.length && stepsRetryUsed && checkTotalTimeout() === false) {
+          steps = (await buildStepsOnce()) ?? [];
         }
+
+        debugInfo.stepsTotalMs = Date.now() - stepsStart;
 
         if (!steps.length || !headerResult) {
           if (!steps.length && !(debugInfo as any).fallbackReason) {
             (debugInfo as any).fallbackReason = "steps_chunk_failed";
           }
+          debugInfo.pipelinePath = "fallback_single_shot";
           const prompt = createControlledAnalysisPrompt(args.problemText, args.difficulty);
           const rawResult = await this.generateContent<AnalysisResult>({
             contents: [
@@ -377,13 +476,27 @@ export class GeminiProvider implements AIProvider {
 
           const verification = verifyAnalysis(rawResult);
           if (!verification.ok) {
+            (debugInfo as any).verifyIssuesCount = verification.issues.length;
+            (debugInfo as any).verifyIssuesTop3 = verification.issues.slice(0, 3);
             throw new Error(`analysis_verify_failed:${verification.issues.join(",")}`);
           }
+
+          if ((debugInfo as any).verifyIssuesCount === undefined) {
+            (debugInfo as any).verifyIssuesCount = 0;
+            (debugInfo as any).verifyIssuesTop3 = [];
+          }
+          debugInfo.modelFinal = modelToUse;
+          debugInfo.totalMs = Date.now() - totalStart;
 
           rawResult._debug = { ...(rawResult._debug ?? {}), ...debugInfo };
           return rawResult;
         }
 
+        debugInfo.pipelinePath = "chunked";
+        debugInfo.modelFinal = modelToUse;
+        if ((debugInfo as any).fallbackReason) {
+          delete (debugInfo as any).fallbackReason;
+        }
         const assembled: AnalysisResult = {
           status: "success",
           problems: [
@@ -400,9 +513,17 @@ export class GeminiProvider implements AIProvider {
 
         const verification = verifyAnalysis(assembled);
         if (!verification.ok) {
+          (debugInfo as any).verifyIssuesCount = verification.issues.length;
+          (debugInfo as any).verifyIssuesTop3 = verification.issues.slice(0, 3);
           throw new Error(`analysis_verify_failed:${verification.issues.join(",")}`);
         }
 
+        if ((debugInfo as any).verifyIssuesCount === undefined) {
+          (debugInfo as any).verifyIssuesCount = 0;
+          (debugInfo as any).verifyIssuesTop3 = [];
+        }
+
+        debugInfo.totalMs = Date.now() - totalStart;
         return assembled;
       } catch (error) {
         lastError = error;

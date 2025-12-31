@@ -76,8 +76,10 @@ export async function POST(req: Request) {
           ? finalResult._debug
           : {};
       finalResult._debug = { ...existingDebug, provider: provider.name };
-    } else if (finalResult?._debug) {
-      delete finalResult._debug;
+    } else {
+      if (finalResult?._debug) {
+        delete finalResult._debug;
+      }
     }
 
     return NextResponse.json(finalResult);

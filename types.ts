@@ -51,7 +51,20 @@ export interface AnalysisResult {
     escalated?: boolean;
     retries?: number;
     chunkSize?: number;
+    chunkHistory?: number[];
     model?: string;
+    modelsTried?: string[];
+    modelFinal?: string;
+    stepsEscalated?: boolean;
+    stepsModelInitial?: string;
+    stepsModelFinal?: string;
+    pipelinePath?: "chunked" | "fallback_single_shot";
+    routeDecision?: "simple" | "complex";
+    fallbackReason?: string;
+    stepsTotalMs?: number;
+    totalMs?: number;
+    verifyIssuesTop3?: string[];
+    verifyIssuesCount?: number;
   };
 }
 

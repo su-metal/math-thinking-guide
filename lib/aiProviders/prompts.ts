@@ -686,11 +686,45 @@ export function createStepsChunkPrompt(args: {
   endOrder: number;
 }) {
   const { problemText, difficulty, stepTitles, startOrder, endOrder } = args;
+  const stepCountRules =
+    difficulty === "hard"
+      ? [
+          "- ステップ数は必要最小限で決める。無理に増やさない。",
+          "- 同じ内容の言い換えや、意味の薄い分割で水増ししない。",
+          "- 理解に必要であれば6ステップを超えてもよい。",
+        ].join("\n")
+      : [
+          "- ステップ数は必要最小限で決める。無理に増やさない。",
+          "- easy/normal は原則として3?5ステップで十分。",
+          "- 同じ内容の言い換えや、意味の薄い分割で水増ししない。",
+        ].join("\n");
+  const comparisonRules =
+    difficulty === "hard"
+      ? [
+          "- 比較や結論は1ステップでまとめてもよい。",
+          "- ただし必要なら比較を複数ステップに分けてもよい。",
+        ].join("\n")
+      : [
+          "- 比較と結論は1ステップで完結させる（比較だけ/結論だけに分割しない）。",
+          "- 例: (1) 1組の計算 (2) 2組の計算 (3) 比較して結論",
+        ].join("\n");
+  const stepTitlesBlock =
+    Array.isArray(stepTitles) && stepTitles.length > 0
+      ? `【この範囲のステップ要点】\n${stepTitles
+          .map((t, idx) => `${startOrder + idx}. ${t}`)
+          .join("\n")}`
+      : "【この範囲のステップ要点】\n(要点なし: order を 1 からの連番で作る)";
   return `
 指定された範囲のステップだけを作成してください。
 命令口調や講義口調は避け、やさしい会話調(できたかな？、かんがえてみよう)で書いてください。
-hint は着眼点と作戦だけ、solution は意味づけと短い問いかけだけ。
-calculation を出す場合は expression と result を必ず入れます。
+ hint は着眼点と作戦だけ、solution は意味づけと短い問いかけだけ。
+ calculation を出す場合は expression と result を必ず入れます。
+ 
+ 【ステップ数の決め方】
+ ${stepCountRules}
+
+【比較・結論の扱い】
+${comparisonRules}
 
 【calculation ルール】
 - expression は四則演算のみ: + - * / × ÷ ( ) と整数/小数/分数 a/b
@@ -704,8 +738,7 @@ calculation を出す場合は expression と result を必ず入れます。
 - ${VOCABULARY_RULES[difficulty]}
 - Separation Rule（1ステップ＝1対象）は厳守。
 
-【この範囲のステップ要点】
-${stepTitles.map((t, idx) => `${startOrder + idx}. ${t}`).join("\n")}
+${stepTitlesBlock}
 
 【出力形式(JSONのみ)】
 {
@@ -730,25 +763,22 @@ export function createAnalysisHeaderPrompt(args: {
     : "";
 
   return `
-あなたは算数問題の「考え方ヒント」と「最終回答」だけを作成します。
+「考え方ヒント」と「最終回答」だけを作成します。
 method_hint は必須で、label と pitch は辞書の文をそのまま使います。
-final_answer は「答え：」と「【理由】」の形で、会話調で短くまとめてください。
+final_answer は「答え：」と「【理由】」の形で、会話調で短くまとめます。
 
 【制御情報】
 - 難易度: ${difficulty}
 - ${VOCABULARY_RULES[difficulty]}
 
-【計算法辞書】
+【辞書】
 ${METHOD_DICT_V1_1}
 
-【ステップの要点（短く）】
+【ステップ要点】
 ${titles}
 
-【出力形式(JSONのみ)】
-{
-  "method_hint": { "label": "辞書のlabelそのまま", "pitch": "辞書のpitchそのまま" },
-  "final_answer": "答え：...\\n\\n【理由】..."
-}
+【出力(JSONのみ)】
+{ "method_hint": { "label": "辞書のlabelそのまま", "pitch": "辞書のpitchそのまま" }, "final_answer": "答え：...\\n\\n【理由】..." }
 
 【問題文】
 ${problemText}
