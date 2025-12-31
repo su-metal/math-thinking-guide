@@ -29,7 +29,7 @@ export async function readMathProblem(
 
 export async function solveMathProblem(
   problem_text: string,
-  meta?: ReadResult["meta"],
+  meta?: AnalysisResult["meta"],
   signal?: AbortSignal
 ): Promise<AnalysisResult> {
   const response = await fetch("/api/solve", {

@@ -454,7 +454,7 @@ const App: React.FC = () => {
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
   const [analysisPhase, setAnalysisPhase] = useState<"idle" | "reading" | "read_done" | "solving" | "done" | "error">("idle");
   const [readProblemText, setReadProblemText] = useState<string | null>(null);
-  const [readMeta, setReadMeta] = useState<ReadResult["meta"] | null>(null);
+  const [readProblems, setReadProblems] = useState<ReadResult["problems"] | null>(null);
   const [drillResult, setDrillResult] = useState<DrillResult | null>(null);
   const [tempImage, setTempImage] = useState<string | null>(null);
   const [croppedImage, setCroppedImage] = useState<string | null>(null);
@@ -564,7 +564,7 @@ const App: React.FC = () => {
     setShowFinalAnswer(false);
     setAnalysisResult(null);
     setReadProblemText(null);
-    setReadMeta(null);
+    setReadProblems(null);
     setAnalysisPhase("reading");
 
     requestIdRef.current += 1;
@@ -578,14 +578,24 @@ const App: React.FC = () => {
       const readResult = await readMathProblem(img, readController.signal);
       if (requestIdRef.current !== requestId) return;
 
-      setReadProblemText(readResult.problem_text);
-      setReadMeta(readResult.meta);
+      const extractedProblems = Array.isArray(readResult.problems) ? readResult.problems : [];
+      if (extractedProblems.length === 0) {
+        throw new Error("問題が見つかりませんでした。もっと明るい場所で、問題を大きく撮ってみてね。");
+      }
+
+      setReadProblemText(extractedProblems[0]?.problem_text ?? null);
+      setReadProblems(extractedProblems);
       setAnalysisPhase("read_done");
+
+      if (extractedProblems.length > 1) {
+        setCurrentScreen(AppScreen.PROBLEM_SELECT);
+        return;
+      }
 
       const solveController = new AbortController();
       solveAbortRef.current = solveController;
       setAnalysisPhase("solving");
-      const result = await solveMathProblem(readResult.problem_text, readResult.meta, solveController.signal);
+      const result = await solveMathProblem(extractedProblems[0].problem_text, undefined, solveController.signal);
       if (requestIdRef.current !== requestId) return;
 
       console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
@@ -593,14 +603,7 @@ const App: React.FC = () => {
       setCurrentProblemIndex(0);
       setCurrentStepIndex(0);
       setAnalysisPhase("done");
-
-      if (result.problems && result.problems.length > 1) {
-        setCurrentScreen(AppScreen.PROBLEM_SELECT);
-      } else if (result.problems && result.problems.length === 1) {
-        setCurrentScreen(AppScreen.RESULT);
-      } else {
-        throw new Error("問題が見つかりませんでした。もっと明るい場所で、問題を大きく撮ってみてね。");
-      }
+      setCurrentScreen(AppScreen.RESULT);
 
       const historyItem: HistoryItem = {
         id: Date.now().toString(),
@@ -621,7 +624,49 @@ const App: React.FC = () => {
     }
   };
 
-  const selectProblem = (index: number) => {
+  const selectProblem = async (index: number) => {
+    const selectableProblems =
+      readProblems ?? (analysisResult ? analysisResult.problems : []);
+    const selected = selectableProblems[index];
+    if (!selected) return;
+
+    if (!analysisResult && readProblems) {
+      setReadProblemText(selected.problem_text);
+      setAnalysisPhase("solving");
+      setCurrentScreen(AppScreen.LOADING);
+
+      const solveController = new AbortController();
+      solveAbortRef.current = solveController;
+
+      try {
+        const result = await solveMathProblem(selected.problem_text, undefined, solveController.signal);
+        console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
+        setAnalysisResult(result);
+        setCurrentProblemIndex(0);
+        setCurrentStepIndex(0);
+        setAnalysisPhase("done");
+        setCurrentScreen(AppScreen.RESULT);
+
+        const historyItem: HistoryItem = {
+          id: Date.now().toString(),
+          timestamp: Date.now(),
+          image: croppedImage ?? "",
+          result: result
+        };
+        console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
+        saveHistory(historyItem);
+        decreaseTries();
+      } catch (err: any) {
+        if (isAbortError(err)) {
+          return;
+        }
+        setAnalysisPhase("error");
+        alert(err.message || "エラーがおきました。もういちど試してね。");
+        setCurrentScreen(AppScreen.HOME);
+      }
+      return;
+    }
+
     setCurrentProblemIndex(index);
     setCurrentStepIndex(0);
     setShowFinalAnswer(false);
@@ -858,7 +903,9 @@ const App: React.FC = () => {
   );
 
   const renderProblemSelect = () => {
-    if (!analysisResult) return null;
+    const selectableProblems =
+      readProblems ?? (analysisResult ? analysisResult.problems : []);
+    if (!selectableProblems.length) return null;
     return (
       <div className="min-h-screen bg-blue-50 flex flex-col">
         <Header title="どの問題を解く？" leftIcon={<X />} onLeftClick={() => setCurrentScreen(AppScreen.HOME)} />
@@ -866,12 +913,12 @@ const App: React.FC = () => {
           <div className="mb-6 flex flex-col items-center">
             <AITeacher mood="HAPPY" />
             <p className="text-blue-600 font-black mt-2 flex items-center gap-2">
-              <LayoutList size={20} /> {analysisResult.problems.length}個の問題が見つかったよ！
+              <LayoutList size={20} /> {selectableProblems.length}個の問題が見つかったよ！
             </p>
           </div>
 
           <div className="w-full flex overflow-x-auto snap-x snap-mandatory scrollbar-hide gap-6 px-4 pb-8">
-            {analysisResult.problems.map((p, idx) => (
+            {selectableProblems.map((p, idx) => (
               <div
                 key={p.id || idx}
                 className="snap-center shrink-0 w-[85vw] max-w-sm bg-white rounded-[2.5rem] shadow-xl p-8 flex flex-col border-b-8 border-blue-400 border-r border-l border-t border-gray-100"
@@ -900,7 +947,7 @@ const App: React.FC = () => {
           </div>
 
           <div className="flex gap-2">
-            {analysisResult.problems.map((_, idx) => (
+            {selectableProblems.map((_, idx) => (
               <div key={idx} className={`w-2 h-2 rounded-full bg-blue-200`} />
             ))}
           </div>
@@ -913,6 +960,8 @@ const App: React.FC = () => {
   const renderResult = () => {
     if (!analysisResult || !analysisResult.problems[currentProblemIndex]) return null;
     const problem = analysisResult.problems[currentProblemIndex];
+    const hasMultipleProblems =
+      (readProblems?.length ?? analysisResult.problems.length ?? 0) > 1;
     const isFinishedSteps = currentStepIndex === problem.steps.length;
 
     if (isFinishedSteps) {
@@ -1041,7 +1090,7 @@ const App: React.FC = () => {
                       <Undo2 size={20} /> 解説にもどる
                     </button>
 
-                    {analysisResult.problems.length > 1 && (
+                    {hasMultipleProblems && (
                       <button
                         onClick={() => setCurrentScreen(AppScreen.PROBLEM_SELECT)}
                         className="w-full bg-white border-2 border-gray-100 text-gray-500 py-4 rounded-2xl font-black flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
@@ -1081,8 +1130,8 @@ const App: React.FC = () => {
       <div className="min-h-screen bg-gray-50 flex flex-col">
         <Header
           title="スパッキーのガイド"
-          leftIcon={analysisResult.problems.length > 1 ? <LayoutList /> : <X />}
-          onLeftClick={() => analysisResult.problems.length > 1 ? setCurrentScreen(AppScreen.PROBLEM_SELECT) : setCurrentScreen(AppScreen.HOME)}
+          leftIcon={hasMultipleProblems ? <LayoutList /> : <X />}
+          onLeftClick={() => hasMultipleProblems ? setCurrentScreen(AppScreen.PROBLEM_SELECT) : setCurrentScreen(AppScreen.HOME)}
         />
         <main className="flex-1 flex flex-col p-4 overflow-y-auto scrollbar-hide">
           <div className="bg-white rounded-2xl p-5 shadow-sm mb-4 border border-gray-100 shrink-0">

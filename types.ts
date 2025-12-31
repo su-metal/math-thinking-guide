@@ -68,15 +68,15 @@ export interface AnalysisResult {
   };
 }
 
+export interface ExtractedProblem {
+  id: string;
+  title?: string;
+  problem_text: string;
+}
+
 export interface ReadResult {
   status: "success";
-  problem_text: string;
-  meta: {
-    difficulty: "easy" | "normal" | "hard";
-    tags: string[];
-    confidence: number;
-    signals: Record<string, unknown>;
-  };
+  problems: ExtractedProblem[];
   _debug?: {
     provider?: string;
     phase?: string;

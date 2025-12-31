@@ -1,3 +1,8 @@
+// NOTE:
+// This route is kept only for backward compatibility.
+// New flow should use /api/read -> /api/solve.
+
+
 import { NextResponse } from "next/server";
 import { getAIProvider } from "@/lib/aiProviders/provider";
 import { estimateLevel } from "@/lib/levelEstimator";
@@ -49,7 +54,11 @@ export async function POST(req: Request) {
   }
 
   try {
-    const problemText = await provider.extractProblemText(imageBase64);
+    const extractedProblems = await provider.extractProblemText(imageBase64);
+    const problemText = extractedProblems[0]?.problem_text?.trim();
+    if (!problemText) {
+      return NextResponse.json({ error: DEFAULT_ERROR_MESSAGE }, { status: 400 });
+    }
     const estimatedMeta = estimateLevel(problemText);
 
     const finalResult: any = await provider.analyzeFromText(

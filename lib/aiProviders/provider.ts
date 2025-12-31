@@ -1,4 +1,4 @@
-import { AnalysisResult, DrillResult } from "../../types";
+import { AnalysisResult, DrillResult, ExtractedProblem } from "../../types";
 import { GeminiProvider } from "./geminiProvider";
 import { OpenAIProvider } from "./openaiProvider";
 import type { Difficulty, LevelMeta } from "@/lib/levelEstimator";
@@ -6,7 +6,7 @@ import type { Difficulty, LevelMeta } from "@/lib/levelEstimator";
 export interface AIProvider {
   name: string;
   analyze(imageBase64: string): Promise<AnalysisResult>;
-  extractProblemText(imageBase64: string): Promise<string>;
+  extractProblemText(imageBase64: string): Promise<ExtractedProblem[]>;
   analyzeFromText(
     problemText: string,
     difficulty: Difficulty,

@@ -1,3 +1,6 @@
+// solve only accepts a single problem_text selected by the user.
+// Do NOT re-extract problems from image here.
+
 import { NextResponse } from "next/server";
 import { getAIProvider } from "@/lib/aiProviders/provider";
 import { estimateLevel, type Difficulty, type LevelMeta } from "@/lib/levelEstimator";

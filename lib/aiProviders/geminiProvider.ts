@@ -1,5 +1,5 @@
 ﻿import { GoogleGenAI } from "@google/genai";
-import { AnalysisResult, DrillResult } from "../../types";
+import { AnalysisResult, DrillResult, ExtractedProblem } from "../../types";
 import { AIProvider } from "./provider";
 import {
   ANALYSIS_PROMPT,
@@ -19,7 +19,7 @@ import {
  *
  * 環境変数があればそちらを優先
  */
-const GEMINI_SIMPLE_MODEL = process.env.GEMINI_SIMPLE_MODEL || "gemini-3-flash-preview";
+const GEMINI_SIMPLE_MODEL = process.env.GEMINI_SIMPLE_MODEL || "gemini-2.5-flash";
 const GEMINI_COMPLEX_MODEL =
   process.env.GEMINI_COMPLEX_MODEL || "gemini-3-flash-preview";
 const GEMINI_ROUTER_MODEL = process.env.GEMINI_ROUTER_MODEL || "gemini-2.5-flash";
@@ -251,11 +251,11 @@ export class GeminiProvider implements AIProvider {
     }
   }
 
-  async extractProblemText(imageBase64: string): Promise<string> {
+  async extractProblemText(imageBase64: string): Promise<ExtractedProblem[]> {
     this.ensureKey();
     const inlineImage = imageBase64.split(",")[1] || imageBase64;
     const mimeType = this.detectMimeType(imageBase64);
-    const extracted = await this.generateContent<{ problem_text: string }>({
+    const extracted = await this.generateContent<{ problems?: ExtractedProblem[] } & { problem_text?: string }>({
       contents: [
         { text: PROBLEM_EXTRACTION_PROMPT },
         {
@@ -270,11 +270,23 @@ export class GeminiProvider implements AIProvider {
       model: GEMINI_COMPLEX_MODEL,
     });
 
-    if (!extracted?.problem_text) {
+    const problems =
+      Array.isArray(extracted?.problems) && extracted.problems.length > 0
+        ? extracted.problems
+        : extracted?.problem_text
+          ? [
+              {
+                id: "p1",
+                problem_text: extracted.problem_text.trim(),
+              },
+            ]
+          : [];
+
+    if (problems.length === 0) {
       throw new Error("問題文の抽出に失敗しました。もう一度試してね。");
     }
 
-    return extracted.problem_text.trim();
+    return problems;
   }
 
   private async analyzeFromTextInternal(args: {
@@ -291,14 +303,15 @@ export class GeminiProvider implements AIProvider {
     };
 
     const isGeometry = Array.isArray(args.metaTags) && args.metaTags.includes("geometry");
+    // solve は JSON 完走が最優先。3200は不足しやすいので引き上げる。
     const defaultMaxOutputTokens =
-  isGeometry
-    ? 3200
-    : args.difficulty === "hard"
-      ? 3200
-      : args.difficulty === "normal"
-        ? 2200
-        : 1200;
+      isGeometry
+        ? 8192
+        : args.difficulty === "hard"
+          ? 8192
+          : args.difficulty === "normal"
+            ? 6144
+            : 4096;
 
     const maxOutputTokens = GEMINI_MAX_OUTPUT_TOKENS ?? defaultMaxOutputTokens;
     const model =

@@ -334,13 +334,18 @@ export function appendImageToPrompt(prompt: string, imageBase64: string) {
 }
 
 export const PROBLEM_EXTRACTION_PROMPT = `
-画像には算数の問題文が写っています。以下の厳格なルールで、問題文だけを抽出してください。
+画像には算数の問題文が複数写っている可能性があります。以下の厳格なルールで、問題文だけを抽出してください。
 
 - 出力は JSON のみ。余計な説明や余白を含めず、指定した構造だけを返す。
 - 出力形式:
 {
-  "problem_text": "画像にある問題文を事実どおりに再構成した文章"
+  "problems": [
+    { "id": "p1", "title": "短い見出し", "problem_text": "画像にある問題文を事実どおりに再構成した文章" }
+  ]
 }
+- problems は画像内の上→下、左→右の順に並べる。
+- title は任意。付ける場合は12〜18文字程度の短い見出しにする。
+- (1)(2) の小問は、同一テーマ/同一図を共有するなら1つの problem_text にまとめる。完全に独立なら分ける。
 - 図中や文章中の数値・単位・割合・条件をすべて自然な日本語で記述し、指示語や番号（①など）は具体的な語に置き換えてください。
 - 文章はやさしい語尾で、問いかけや命令口調を避けて客観的に説明する形にしてください。
 `;
@@ -349,9 +354,21 @@ export const PROBLEM_EXTRACTION_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    problem_text: { type: "string" },
+    problems: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          title: { type: "string" },
+          problem_text: { type: "string" },
+        },
+        required: ["id", "problem_text"],
+      },
+    },
   },
-  required: ["problem_text"],
+  required: ["problems"],
 } as const;
 
 const STEP_COUNT_RULES: Record<Difficulty, string> = {

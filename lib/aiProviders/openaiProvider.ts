@@ -1,4 +1,4 @@
-import { AnalysisResult, DrillResult } from "../../types";
+import { AnalysisResult, DrillResult, ExtractedProblem } from "../../types";
 import { AIProvider } from "./provider";
 import {
   ANALYSIS_PROMPT,
@@ -279,14 +279,28 @@ export class OpenAIProvider implements AIProvider {
     return parsed;
   }
 
-  async extractProblemText(imageBase64: string): Promise<string> {
+  async extractProblemText(imageBase64: string): Promise<ExtractedProblem[]> {
     const raw = await this.request(PROBLEM_EXTRACTION_PROMPT, PROBLEM_EXTRACTION_SCHEMA, imageBase64);
     console.log(`[${this.name}] raw model text (extract problem text)`, raw);
-    const parsed = this.parseJson<{ problem_text: string }>(raw, "openai extract problem text");
-    if (!parsed?.problem_text) {
+    const parsed = this.parseJson<{ problems?: ExtractedProblem[] } & { problem_text?: string }>(
+      raw,
+      "openai extract problem text"
+    );
+    const problems =
+      Array.isArray(parsed?.problems) && parsed.problems.length > 0
+        ? parsed.problems
+        : parsed?.problem_text
+          ? [
+              {
+                id: "p1",
+                problem_text: parsed.problem_text.trim(),
+              },
+            ]
+          : [];
+    if (problems.length === 0) {
       throw new Error("問題文の抽出に失敗しました。もう一度試してね。");
     }
-    return parsed.problem_text.trim();
+    return problems;
   }
 
   private applyForcedJudgementStep(steps: AnalysisResult["problems"][number]["steps"]) {

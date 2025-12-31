@@ -1,6 +1,5 @@
 import { NextResponse } from "next/server";
 import { getAIProvider } from "@/lib/aiProviders/provider";
-import { estimateLevel } from "@/lib/levelEstimator";
 import type { ReadResult } from "@/types";
 
 const DEFAULT_ERROR_MESSAGE =
@@ -23,13 +22,11 @@ export async function POST(req: Request) {
   }
 
   try {
-    const problemText = await provider.extractProblemText(imageBase64);
-    const meta = estimateLevel(problemText);
+    const problems = await provider.extractProblemText(imageBase64);
 
     const result: ReadResult = {
       status: "success",
-      problem_text: problemText,
-      meta,
+      problems,
       _debug: { provider: provider.name, phase: "read" },
     };
 
