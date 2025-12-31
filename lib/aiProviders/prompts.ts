@@ -645,11 +645,16 @@ const VOCABULARY_RULES: Record<Difficulty, string> = {
 };
 
 export function createControlledAnalysisPrompt(problemText: string, difficulty: Difficulty) {
+  const easyExtra =
+    difficulty === "easy"
+      ? "\n- easy は文を短くする。具体例の長い列挙はしない。"
+      : "";
   return `${ANALYSIS_PROMPT}
 【制御情報（以下を必ず守る）】
 - 難易度: ${difficulty}
 - ${STEP_COUNT_RULES[difficulty]}
 - ${VOCABULARY_RULES[difficulty]}
+${easyExtra}
 - Separation Rule（1ステップ＝1対象）と前ステップの振り返りルールは継続。
 - 「problem_text」の内容を尊重し、画像内の数値・条件・図表を忠実になぞるよう努める。
 

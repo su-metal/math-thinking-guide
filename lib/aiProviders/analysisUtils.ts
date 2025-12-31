@@ -155,13 +155,13 @@ export function sanitizeAnswerLeakInSteps(steps: MathStep[]): boolean {
     if (typeof step?.hint === "string") {
       step.hint = updateText(
         step.hint,
-        "いま分かったことを使って、最後に答えの形にまとめる準備をしよう。"
+        "いま分かったことを使って、最後にまとめる準備をしよう。"
       );
     }
     if (typeof step?.solution === "string") {
       step.solution = updateText(
         step.solution,
-        "求めた数が何を表すかを言葉で言えると、答えを書きやすくなるよ。"
+        "求めた数が何を表すかを言葉で言えると、書きやすくなるよ。"
       );
     }
   });

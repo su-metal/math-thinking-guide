@@ -29,6 +29,8 @@ const OPENAI_URL = "https://api.openai.com/v1/responses";
 const OPENAI_MODEL = "gpt-5-mini-2025-08-07";
 const OPENAI_PRO_MODEL = process.env.OPENAI_PRO_MODEL || OPENAI_MODEL;
 const OPENAI_MAX_OUTPUT_TOKENS = Number(process.env.OPENAI_MAX_OUTPUT_TOKENS ?? "0") || undefined;
+const OPENAI_EASY_SINGLE_MAX_TOKENS = 800;
+const OPENAI_FINAL_ANSWER_MAX_TOKENS = 220;
 
 const TIMEOUT_PLAN_MS = 10_000;
 const TIMEOUT_HEADER_MS = 25_000;
@@ -46,11 +48,126 @@ export class OpenAIProvider implements AIProvider {
     }
   }
 
+  private isTimeoutAbort(error: unknown): boolean {
+    if (!error || typeof error !== "object") return false;
+    const name = (error as { name?: string }).name;
+    const message = (error as { message?: string }).message ?? "";
+    return name === "AbortError" || message.startsWith("Timeout:");
+  }
+
+  private buildMethodHint(problemText: string): { label: string; pitch: string } {
+    const text = problemText ?? "";
+    const lower = text.toLowerCase();
+
+    const unitRateKeywords = ["あたり", "1人あたり", "一人あたり", "こんでいる", "みっしり"];
+    if (unitRateKeywords.some((k) => lower.includes(k))) {
+      return {
+        label: "分配算",
+        pitch: "比べたいときは、ちがう量をそのまま見くらべないで、同じ単位にそろえて考えると分かりやすいよ。",
+      };
+    }
+
+    if (lower.includes("%") || lower.includes("割合") || lower.includes("パーセント")) {
+      return {
+        label: "割合をそろえる",
+        pitch: "割合は基準をそろえると比べやすいよ。何を100%にするかを先に決めると進めやすい。",
+      };
+    }
+
+    if (lower.includes("比") || lower.includes("比例") || lower.includes("反比例")) {
+      return {
+        label: "くらべ方をそろえる",
+        pitch: "比べるときは、同じものさしにそろえてから見ると違いが分かりやすいよ。",
+      };
+    }
+
+    if (lower.includes("平均") || lower.includes("ならす")) {
+      return {
+        label: "平均の考え方",
+        pitch: "平均はみんなを同じにそろえる中心だよ。平均との差を考えると整理しやすい。",
+      };
+    }
+
+    return {
+      label: "情報を整理して、同じものさしで比べよう",
+      pitch: "比べたいときは、ちがう量をそのまま見くらべないで、同じ単位にそろえて考えると分かりやすいよ。",
+    };
+  }
+
+  private buildTimeoutSteps(difficulty: "easy" | "normal" | "hard") {
+    const base = [
+      {
+        order: 1,
+        hint: "問題の中で、数と単位が書いてあるところを見てみよう。",
+        solution: "どの数が何を表すか、言葉で整理できそうだね。どうかな？",
+      },
+      {
+        order: 2,
+        hint: "同じ1つ分にそろえるなら、どの数を使うとよさそうかな？",
+        solution: "そろえる準備ができると、次の計算が見えてくるよ。進めそうかな？",
+      },
+      {
+        order: 3,
+        hint: "求めたいものに合わせて、必要な計算を1つ選んでみよう。",
+        solution: "計算した数が何を表すか、言葉で確かめられると安心だね。どうかな？",
+      },
+    ];
+    if (difficulty === "easy") {
+      return base;
+    }
+    return [
+      ...base,
+      {
+        order: 4,
+        hint: "出てきた数をまとめて確認しよう。",
+        solution: "どの数が最後の言い方に近い形か、言葉でたしかめられると安心だね。どうかな？",
+      },
+    ];
+  }
+
+  private buildTimeoutResult(args: {
+    problemText: string;
+    difficulty: "easy" | "normal" | "hard";
+    finalAnswer?: string;
+    debug?: boolean;
+    debugInfo: Record<string, unknown>;
+    timeoutContext: string;
+  }): AnalysisResult {
+    const methodHint = this.buildMethodHint(args.problemText);
+    const steps = this.buildTimeoutSteps(args.difficulty);
+    sanitizeAnswerLeakInSteps(steps);
+    ensureFinalCheckStep(steps);
+
+    const finalAnswer =
+      args.finalAnswer && args.finalAnswer.trim()
+        ? args.finalAnswer
+        : "答え：条件に合う数になるよ。\n\n【理由】計算の流れを整理できたら、答えの形にまとめられるよ。";
+
+    if (args.debug) {
+      (args.debugInfo as any).timeoutAborted = true;
+      (args.debugInfo as any).timeoutContext = args.timeoutContext;
+    }
+
+    return {
+      status: "success",
+      problems: [
+        {
+          id: createProblemId(),
+          problem_text: args.problemText,
+          steps,
+          final_answer: finalAnswer,
+          method_hint: methodHint,
+        },
+      ],
+      _debug: { ...args.debugInfo },
+    };
+  }
+
   private async request(
     prompt: string,
     schema: object,
     imageDataUrl?: string,
-    options?: { timeoutMs?: number; model?: string }
+    options?: { timeoutMs?: number; model?: string; maxOutputTokens?: number; context?: string }
   ): Promise<string> {
     const content: any[] = [{ type: "input_text", text: prompt }];
 
@@ -78,26 +195,45 @@ export class OpenAIProvider implements AIProvider {
           schema,
         },
       },
-      ...(OPENAI_MAX_OUTPUT_TOKENS ? { max_output_tokens: OPENAI_MAX_OUTPUT_TOKENS } : {}),
+      ...(options?.maxOutputTokens
+        ? { max_output_tokens: options.maxOutputTokens }
+        : OPENAI_MAX_OUTPUT_TOKENS
+          ? { max_output_tokens: OPENAI_MAX_OUTPUT_TOKENS }
+          : {}),
       // gpt-5-mini は temperature 非対応なので入れない
     };
 
+    let timedOut = false;
     const controller = typeof AbortController !== "undefined" ? new AbortController() : undefined;
     const timeoutMs = options?.timeoutMs ?? 0;
     const timeoutId =
       controller && timeoutMs
-        ? setTimeout(() => controller.abort(), timeoutMs)
+        ? setTimeout(() => {
+            timedOut = true;
+            controller.abort();
+          }, timeoutMs)
         : undefined;
-
-    const response = await fetch(OPENAI_URL, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify(payload),
-      signal: controller?.signal,
-    });
+    const response = await (async () => {
+      try {
+        const res = await fetch(OPENAI_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify(payload),
+          signal: controller?.signal,
+        });
+        return res;
+      } catch (error) {
+        if (timedOut) {
+          const err = new Error(`Timeout: ${options?.context ?? "openai request"}`);
+          (err as any).name = "AbortError";
+          throw err;
+        }
+        throw error;
+      }
+    })();
     if (timeoutId) clearTimeout(timeoutId);
 
     if (!response.ok) {
@@ -175,6 +311,7 @@ export class OpenAIProvider implements AIProvider {
     difficulty: "easy" | "normal" | "hard";
     imageBase64?: string;
     metaTags?: string[];
+    debug?: boolean;
   }): Promise<AnalysisResult> {
     const totalStart = Date.now();
     const debugInfo: Record<string, unknown> = {
@@ -215,6 +352,8 @@ export class OpenAIProvider implements AIProvider {
             const raw = await this.request(prompt, ANALYSIS_RESPONSE_SCHEMA, undefined, {
               timeoutMs: TIMEOUT_FULL_MS,
               model,
+              maxOutputTokens: args.difficulty === "easy" ? OPENAI_EASY_SINGLE_MAX_TOKENS : undefined,
+              context: "single_shot",
             });
             const parsed = this.parseJson<AnalysisResult>(raw, "openai controlled analysis single");
             const problem = parsed?.problems?.[0];
@@ -258,6 +397,21 @@ export class OpenAIProvider implements AIProvider {
             parsed._debug = { ...(parsed._debug ?? {}), ...debugInfo };
             return parsed;
           } catch (error) {
+            if (this.isTimeoutAbort(error)) {
+              if (args.debug) {
+                console.warn(
+                  `[${this.name}] timeout abort model=${model} attempt=${attempt}`,
+                  (error as Error)?.message
+                );
+              }
+              return this.buildTimeoutResult({
+                problemText: args.problemText,
+                difficulty: args.difficulty,
+                debug: args.debug,
+                debugInfo,
+                timeoutContext: "single_shot",
+              });
+            }
             lastError = error;
             console.warn(
               `[${this.name}] single-shot analysis failed model=${model} attempt=${attempt}`,
@@ -269,6 +423,7 @@ export class OpenAIProvider implements AIProvider {
       throw lastError ?? new Error("AIの出力が途中で崩れました。もう一度撮って試してね。");
     }
 
+    let latestFinalAnswer: string | undefined;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
       const wantsEscalation = args.difficulty === "hard" || attempt > 0;
       const modelToUse = wantsEscalation ? OPENAI_PRO_MODEL : OPENAI_MODEL;
@@ -283,6 +438,7 @@ export class OpenAIProvider implements AIProvider {
         const planRaw = await this.request(planPrompt, ANALYSIS_PLAN_SCHEMA, undefined, {
           timeoutMs: TIMEOUT_PLAN_MS,
           model: modelToUse,
+          context: "analysis plan",
         });
         const planResult = this.parseJson<{ step_count: number; step_titles: string[] }>(
           planRaw,
@@ -313,12 +469,18 @@ export class OpenAIProvider implements AIProvider {
           const headerRaw = await this.request(headerPrompt, ANALYSIS_HEADER_SCHEMA, undefined, {
             timeoutMs: TIMEOUT_HEADER_MS,
             model: modelToUse,
+            maxOutputTokens: OPENAI_FINAL_ANSWER_MAX_TOKENS,
+            context: "analysis header",
           });
           headerResult = this.parseJson<{
             method_hint: { label: string; pitch: string };
             final_answer: string;
           }>(headerRaw, "openai analysis header");
+          latestFinalAnswer = headerResult?.final_answer;
         } catch (headerError) {
+          if (this.isTimeoutAbort(headerError)) {
+            throw headerError;
+          }
           console.warn(`[${this.name}] header generation failed, fallback to single-shot`, headerError);
           headerResult = null;
         }
@@ -367,6 +529,7 @@ export class OpenAIProvider implements AIProvider {
                 const chunkRaw = await this.request(chunkPromptResolved, ANALYSIS_STEPS_CHUNK_SCHEMA, undefined, {
                   timeoutMs: TIMEOUT_STEPS_MS,
                   model: stepsModelToUse,
+                  context: `analysis steps ${startOrder}-${endOrder}`,
                 });
                 const chunkResult = this.parseJson<{ steps: AnalysisResult["problems"][number]["steps"] }>(
                   chunkRaw,
@@ -414,6 +577,9 @@ export class OpenAIProvider implements AIProvider {
               debugInfo.stepsModelFinal = stepsModelOverride ?? modelToUse;
               return collected;
             } catch (chunkError) {
+              if (this.isTimeoutAbort(chunkError)) {
+                throw chunkError;
+              }
               const msg = String((chunkError as Error)?.message || "");
               const isStepsTimeout = msg.includes("Timeout:") && msg.includes("analysis steps");
               if (isStepsTimeout) {
@@ -453,6 +619,7 @@ export class OpenAIProvider implements AIProvider {
           const raw = await this.request(prompt, ANALYSIS_RESPONSE_SCHEMA, args.imageBase64, {
             timeoutMs: TIMEOUT_FULL_MS,
             model: modelToUse,
+            context: "controlled analysis",
           });
           console.log(`[${this.name}] raw model text (controlled analysis)`, raw);
           const parsed = this.parseJson<AnalysisResult>(raw, "openai controlled analysis");
@@ -525,6 +692,22 @@ export class OpenAIProvider implements AIProvider {
         debugInfo.totalMs = Date.now() - totalStart;
         return assembled;
       } catch (error) {
+        if (this.isTimeoutAbort(error)) {
+          if (args.debug) {
+            console.warn(
+              `[${this.name}] timeout abort attempt=${attempt}`,
+              (error as Error)?.message
+            );
+          }
+          return this.buildTimeoutResult({
+            problemText: args.problemText,
+            difficulty: args.difficulty,
+            finalAnswer: latestFinalAnswer,
+            debug: args.debug,
+            debugInfo,
+            timeoutContext: "chunked_or_fallback",
+          });
+        }
         lastError = error;
         console.warn(`[${this.name}] controlled analysis failed attempt=${attempt}`, error);
       }
@@ -536,9 +719,15 @@ export class OpenAIProvider implements AIProvider {
   async analyzeFromText(
     problemText: string,
     difficulty: "easy" | "normal" | "hard",
-    meta?: { tags?: string[] }
+    meta?: { tags?: string[] },
+    options?: { debug?: boolean }
   ) {
-    return this.analyzeFromTextInternal({ problemText, difficulty, metaTags: meta?.tags });
+    return this.analyzeFromTextInternal({
+      problemText,
+      difficulty,
+      metaTags: meta?.tags,
+      debug: options?.debug,
+    });
   }
 
   async analyzeWithControls(args: {

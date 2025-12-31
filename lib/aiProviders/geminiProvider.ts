@@ -35,10 +35,12 @@ import {
  */
 const GEMINI_SIMPLE_MODEL = process.env.GEMINI_SIMPLE_MODEL || "gemini-2.5-flash";
 const GEMINI_COMPLEX_MODEL =
-  process.env.GEMINI_COMPLEX_MODEL || "gemini-2.5-flash";
+  process.env.GEMINI_COMPLEX_MODEL || "gemini-3-flash-preview";
 const GEMINI_ROUTER_MODEL = process.env.GEMINI_ROUTER_MODEL || "gemini-2.5-flash";
 const GEMINI_PRO_MODEL = process.env.GEMINI_PRO_MODEL || GEMINI_COMPLEX_MODEL;
 const GEMINI_MAX_OUTPUT_TOKENS = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS ?? "0") || undefined;
+const GEMINI_EASY_SINGLE_MAX_TOKENS = 800;
+const GEMINI_FINAL_ANSWER_MAX_TOKENS = 220;
 
 const FINAL_ANSWER_SCHEMA = {
   type: "object",
@@ -149,14 +151,26 @@ export class GeminiProvider implements AIProvider {
     }
   }
 
-  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, context: string): Promise<T> {
-    if (!timeoutMs) return promise;
+  private async withTimeout<T>(
+    run: (signal: AbortSignal) => Promise<T>,
+    timeoutMs: number,
+    context: string
+  ): Promise<T> {
+    const controller = new AbortController();
+    if (!timeoutMs) {
+      return run(controller.signal);
+    }
     let timer: NodeJS.Timeout | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`Timeout: ${context}`)), timeoutMs);
+      timer = setTimeout(() => {
+        controller.abort();
+        const err = new Error(`Timeout: ${context}`);
+        (err as any).name = "AbortError";
+        reject(err);
+      }, timeoutMs);
     });
     try {
-      return await Promise.race([promise, timeoutPromise]);
+      return await Promise.race([run(controller.signal), timeoutPromise]);
     } finally {
       if (timer) clearTimeout(timer);
     }
@@ -201,6 +215,82 @@ export class GeminiProvider implements AIProvider {
     };
   }
 
+  private isTimeoutAbort(error: unknown): boolean {
+    if (!error || typeof error !== "object") return false;
+    const name = (error as { name?: string }).name;
+    const message = (error as { message?: string }).message ?? "";
+    return name === "AbortError" && message.startsWith("Timeout:");
+  }
+
+  private buildTimeoutSteps(difficulty: "easy" | "normal" | "hard") {
+    const base = [
+      {
+        order: 1,
+        hint: "問題の中で、数と単位が書いてあるところを見てみよう。",
+        solution: "どの数が何を表すか、言葉で整理できそうだね。どうかな？",
+      },
+      {
+        order: 2,
+        hint: "同じ1つ分にそろえるなら、どの数を使うとよさそうかな？",
+        solution: "そろえる準備ができると、次の計算が見えてくるよ。進めそうかな？",
+      },
+      {
+        order: 3,
+        hint: "求めたいものに合わせて、必要な計算を1つ選んでみよう。",
+        solution: "計算した数が何を表すか、言葉で確かめられると安心だね。どうかな？",
+      },
+    ];
+    if (difficulty === "easy") {
+      return base;
+    }
+    return [
+      ...base,
+      {
+        order: 4,
+        hint: "出てきた数をまとめて確認しよう。",
+        solution: "どの数が最後の言い方に近い形か、言葉でたしかめられると安心だね。どうかな？",
+      },
+    ];
+  }
+
+  private buildTimeoutResult(args: {
+    problemText: string;
+    difficulty: "easy" | "normal" | "hard";
+    finalAnswer?: string;
+    debug?: boolean;
+    debugInfo: Record<string, unknown>;
+    timeoutContext: string;
+  }): AnalysisResult {
+    const methodHint = this.buildMethodHint(args.problemText);
+    const steps = this.buildTimeoutSteps(args.difficulty);
+    sanitizeAnswerLeakInSteps(steps);
+    ensureFinalCheckStep(steps);
+
+    const finalAnswer =
+      args.finalAnswer && args.finalAnswer.trim()
+        ? args.finalAnswer
+        : "答え：条件に合う数になるよ。\n\n【理由】計算の流れを整理できたら、答えの形にまとめられるよ。";
+
+    if (args.debug) {
+      (args.debugInfo as any).timeoutAborted = true;
+      (args.debugInfo as any).timeoutContext = args.timeoutContext;
+    }
+
+    return {
+      status: "success",
+      problems: [
+        {
+          id: createProblemId(),
+          problem_text: args.problemText,
+          steps,
+          final_answer: finalAnswer,
+          method_hint: methodHint,
+        },
+      ],
+      _debug: { ...args.debugInfo },
+    };
+  }
+
   private applyForcedJudgementStep(steps: AnalysisResult["problems"][number]["steps"]) {
     if (!Array.isArray(steps) || steps.length === 0) return;
     const last = steps[steps.length - 1];
@@ -227,11 +317,15 @@ export class GeminiProvider implements AIProvider {
           context: "final answer",
           model,
           timeoutMs: TIMEOUT_HEADER_MS,
+          maxOutputTokens: GEMINI_FINAL_ANSWER_MAX_TOKENS,
         });
         if (result?.final_answer) {
           return result.final_answer;
         }
       } catch (error) {
+        if (this.isTimeoutAbort(error)) {
+          throw error;
+        }
         if (model === GEMINI_COMPLEX_MODEL) {
           throw error;
         }
@@ -248,20 +342,26 @@ export class GeminiProvider implements AIProvider {
     context: string;
     model?: string;
     timeoutMs?: number;
+    maxOutputTokens?: number;
   }): Promise<T> {
     this.ensureKey();
 
     const ai = new GoogleGenAI({ apiKey: this.apiKey! });
+    const maxTokens = args.maxOutputTokens ?? GEMINI_MAX_OUTPUT_TOKENS;
     const response = await this.withTimeout(
-      ai.models.generateContent({
-        model: args.model || GEMINI_COMPLEX_MODEL,
-        contents: args.contents,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: args.schema,
-          ...(GEMINI_MAX_OUTPUT_TOKENS ? { maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS } : {}),
-        },
-      }),
+      (signal) => {
+        const request: any = {
+          model: args.model || GEMINI_COMPLEX_MODEL,
+          contents: args.contents,
+          config: {
+            responseMimeType: "application/json",
+            responseSchema: args.schema,
+            ...(maxTokens ? { maxOutputTokens: maxTokens } : {}),
+          },
+          signal,
+        };
+        return ai.models.generateContent(request);
+      },
       args.timeoutMs ?? 0,
       args.context
     );
@@ -339,6 +439,7 @@ export class GeminiProvider implements AIProvider {
     difficulty: "easy" | "normal" | "hard";
     imageBase64?: string;
     metaTags?: string[];
+    debug?: boolean;
   }): Promise<AnalysisResult> {
     this.ensureKey();
     const totalStart = Date.now();
@@ -390,6 +491,7 @@ export class GeminiProvider implements AIProvider {
               context: `controlled analysis single-shot difficulty=${args.difficulty}`,
               model,
               timeoutMs: TIMEOUT_FULL_MS,
+              maxOutputTokens: args.difficulty === "easy" ? GEMINI_EASY_SINGLE_MAX_TOKENS : undefined,
             });
 
             const problem = rawResult?.problems?.[0];
@@ -435,6 +537,21 @@ export class GeminiProvider implements AIProvider {
             rawResult._debug = { ...(rawResult._debug ?? {}), ...debugInfo };
             return rawResult;
           } catch (error) {
+            if (this.isTimeoutAbort(error)) {
+              if (args.debug) {
+                console.warn(
+                  `[${this.name}] timeout abort model=${model} attempt=${attempt}`,
+                  (error as Error)?.message
+                );
+              }
+              return this.buildTimeoutResult({
+                problemText: args.problemText,
+                difficulty: args.difficulty,
+                debug: args.debug,
+                debugInfo,
+                timeoutContext: "single_shot",
+              });
+            }
             lastError = error;
             console.warn(
               `[${this.name}] single-shot analysis failed model=${model} attempt=${attempt}`,
@@ -447,6 +564,7 @@ export class GeminiProvider implements AIProvider {
     }
 
     let lastError: unknown;
+    let latestFinalAnswer: string | undefined;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
       const wantsEscalation = args.difficulty === "hard" || attempt > 0;
       const modelToUse = wantsEscalation ? GEMINI_PRO_MODEL : GEMINI_COMPLEX_MODEL;
@@ -602,6 +720,9 @@ export class GeminiProvider implements AIProvider {
               debugInfo.stepsModelFinal = stepsModelOverride ?? stepsModelInitial;
               return collected;
             } catch (chunkError) {
+              if (this.isTimeoutAbort(chunkError)) {
+                throw chunkError;
+              }
               const msg = String((chunkError as Error)?.message || "");
               const isStepsTimeout = msg.includes("Timeout:") && msg.includes("analysis steps");
               if (isStepsTimeout) {
@@ -678,6 +799,9 @@ export class GeminiProvider implements AIProvider {
               debugInfo.stepsModelFinal = stepsModelInitial;
               return chunkSteps;
             } catch (err) {
+              if (this.isTimeoutAbort(err)) {
+                throw err;
+              }
               const msg = String((err as Error)?.message || "");
               if (msg.includes("Timeout:") && msg.includes("analysis steps")) {
                 (debugInfo as any).fallbackReason = "steps_chunk_timeout";
@@ -772,6 +896,9 @@ export class GeminiProvider implements AIProvider {
           !checkTotalTimeout()
             ? await this.generateFinalAnswer(args.problemText, pushModelTried)
             : "";
+        if (finalAnswer) {
+          latestFinalAnswer = finalAnswer;
+        }
 
         if (!steps.length || !finalAnswer) {
           if (!steps.length && !(debugInfo as any).fallbackReason) {
@@ -870,6 +997,22 @@ export class GeminiProvider implements AIProvider {
         debugInfo.totalMs = Date.now() - totalStart;
         return assembled;
       } catch (error) {
+        if (this.isTimeoutAbort(error)) {
+          if (args.debug) {
+            console.warn(
+              `[${this.name}] timeout abort attempt=${attempt}`,
+              (error as Error)?.message
+            );
+          }
+          return this.buildTimeoutResult({
+            problemText: args.problemText,
+            difficulty: args.difficulty,
+            finalAnswer: latestFinalAnswer,
+            debug: args.debug,
+            debugInfo,
+            timeoutContext: "chunked_or_fallback",
+          });
+        }
         lastError = error;
         console.warn(`[${this.name}] controlled analysis failed attempt=${attempt}`, error);
       }
@@ -881,9 +1024,15 @@ export class GeminiProvider implements AIProvider {
   async analyzeFromText(
     problemText: string,
     difficulty: "easy" | "normal" | "hard",
-    meta?: { tags?: string[] }
+    meta?: { tags?: string[] },
+    options?: { debug?: boolean }
   ) {
-    return this.analyzeFromTextInternal({ problemText, difficulty, metaTags: meta?.tags });
+    return this.analyzeFromTextInternal({
+      problemText,
+      difficulty,
+      metaTags: meta?.tags,
+      debug: options?.debug,
+    });
   }
 
   async analyzeWithControls(args: {

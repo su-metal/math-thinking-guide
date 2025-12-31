@@ -49,7 +49,9 @@ export async function POST(req: Request) {
   try {
     const resolvedMeta = meta ?? estimateLevel(problem_text);
     const resolvedDifficulty = (meta?.difficulty ?? difficulty ?? resolvedMeta.difficulty) as Difficulty;
-    const finalResult: any = await provider.analyzeFromText(problem_text, resolvedDifficulty, resolvedMeta);
+    const finalResult: any = await provider.analyzeFromText(problem_text, resolvedDifficulty, resolvedMeta, {
+      debug,
+    });
 
     const existingMeta = finalResult.meta ?? {};
     const mergedMeta = { ...resolvedMeta, ...existingMeta };

@@ -7,7 +7,12 @@ export interface AIProvider {
   name: string;
   analyze(imageBase64: string): Promise<AnalysisResult>;
   extractProblemText(imageBase64: string): Promise<string>;
-  analyzeFromText(problemText: string, difficulty: Difficulty, meta?: LevelMeta): Promise<AnalysisResult>;
+  analyzeFromText(
+    problemText: string,
+    difficulty: Difficulty,
+    meta?: LevelMeta,
+    options?: { debug?: boolean }
+  ): Promise<AnalysisResult>;
   analyzeWithControls(args: {
     imageBase64: string;
     problemText: string;
