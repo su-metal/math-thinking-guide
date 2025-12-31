@@ -6,14 +6,8 @@ import {
   DRILL_RESPONSE_SCHEMA,
   PROBLEM_EXTRACTION_PROMPT,
   PROBLEM_EXTRACTION_SCHEMA,
-  ANALYSIS_PLAN_SCHEMA,
-  ANALYSIS_STEPS_CHUNK_SCHEMA,
-  ANALYSIS_HEADER_SCHEMA,
-  createControlledAnalysisPrompt,
+  createAnalysisPrompt,
   createDrillPrompt,
-  createAnalysisPlanPrompt,
-  createStepsChunkPrompt,
-  createAnalysisHeaderPrompt,
 } from "./prompts";
 import {
   createProblemId,
@@ -316,404 +310,40 @@ export class OpenAIProvider implements AIProvider {
     const totalStart = Date.now();
     const debugInfo: Record<string, unknown> = {
       provider: this.name,
-      headerTimeoutMs: TIMEOUT_HEADER_MS,
-      headerAttempts: 0,
-      stepsTimeoutMs: TIMEOUT_STEPS_MS,
-      stepsChunkInputSize: 0,
-      stepsChunkHistory: [] as number[],
-      chunkHistory: [] as number[],
-      modelsTried: [] as string[],
-      stepsEscalated: false,
     };
-    const pushModelTried = (model: string) => {
-      const list = debugInfo.modelsTried as string[];
-      if (list.length === 0 || list[list.length - 1] !== model) {
-        list.push(model);
-      }
-    };
-    let lastError: unknown;
+    const prompt = createAnalysisPrompt(args.problemText);
 
-    const needsJudgement = needsJudgementStep(args.problemText, args.metaTags);
-
-    if (args.difficulty !== "hard") {
-      const models = [OPENAI_MODEL, OPENAI_PRO_MODEL];
-      for (const model of models) {
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-          const forceJudgementStep = attempt === 1;
-          try {
-            pushModelTried(model);
-            const promptSuffix =
-              forceJudgementStep && needsJudgement
-                ? "\n\n【追加指示】最後のステップは、計算結果をくらべて判断する内容にする。結論の断定はしない。"
-                : "";
-            const prompt =
-              createControlledAnalysisPrompt(args.problemText, args.difficulty) +
-              promptSuffix;
-            const raw = await this.request(prompt, ANALYSIS_RESPONSE_SCHEMA, undefined, {
-              timeoutMs: TIMEOUT_FULL_MS,
-              model,
-              maxOutputTokens: args.difficulty === "easy" ? OPENAI_EASY_SINGLE_MAX_TOKENS : undefined,
-              context: "single_shot",
-            });
-            const parsed = this.parseJson<AnalysisResult>(raw, "openai controlled analysis single");
-            const problem = parsed?.problems?.[0];
-            if (!problem || !Array.isArray(problem.steps)) {
-              throw new Error("analysis_steps_missing");
-            }
-            if (forceJudgementStep && needsJudgement) {
-              this.applyForcedJudgementStep(problem.steps);
-            }
-            sanitizeAnswerLeakInSteps(problem.steps);
-            ensureFinalCheckStep(problem.steps);
-            let stepCheck = verifySteps(problem.steps, {
-              ignoreDuplicateSimilarity: true,
-              needsJudgement,
-            });
-            if (!stepCheck.ok && stepCheck.issues.includes("answer_leak_in_steps")) {
-              sanitizeAnswerLeakInSteps(problem.steps);
-              stepCheck = verifySteps(problem.steps, {
-                ignoreDuplicateSimilarity: true,
-                needsJudgement,
-              });
-            }
-            if (!stepCheck.ok) {
-              const shouldRetry =
-                !forceJudgementStep && stepCheck.issues.includes("missing_judgement_step");
-              if (shouldRetry) {
-                continue;
-              }
-              throw new Error(`single_shot_verify_failed:${stepCheck.issues.join(",")}`);
-            }
-            if (!problem.final_answer) {
-              throw new Error("final_answer_missing");
-            }
-            if (!problem.method_hint?.pitch) {
-              throw new Error("method_hint_missing");
-            }
-
-            debugInfo.pipelinePath = "single_shot";
-            debugInfo.modelFinal = model;
-            debugInfo.totalMs = Date.now() - totalStart;
-            parsed._debug = { ...(parsed._debug ?? {}), ...debugInfo };
-            return parsed;
-          } catch (error) {
-            if (this.isTimeoutAbort(error)) {
-              if (args.debug) {
-                console.warn(
-                  `[${this.name}] timeout abort model=${model} attempt=${attempt}`,
-                  (error as Error)?.message
-                );
-              }
-              return this.buildTimeoutResult({
-                problemText: args.problemText,
-                difficulty: args.difficulty,
-                debug: args.debug,
-                debugInfo,
-                timeoutContext: "single_shot",
-              });
-            }
-            lastError = error;
-            console.warn(
-              `[${this.name}] single-shot analysis failed model=${model} attempt=${attempt}`,
-              error
-            );
-          }
+    try {
+      const raw = await this.request(prompt, ANALYSIS_RESPONSE_SCHEMA, undefined, {
+        timeoutMs: TIMEOUT_FULL_MS,
+        model: OPENAI_MODEL,
+        maxOutputTokens: args.difficulty === "easy" ? OPENAI_EASY_SINGLE_MAX_TOKENS : undefined,
+        context: "single_shot",
+      });
+      const parsed = this.parseJson<AnalysisResult>(raw, "openai analysis single_shot");
+      debugInfo.pipelinePath = "single_shot";
+      debugInfo.modelFinal = OPENAI_MODEL;
+      debugInfo.totalMs = Date.now() - totalStart;
+      parsed._debug = { ...(parsed._debug ?? {}), ...debugInfo };
+      return parsed;
+    } catch (error) {
+      if (this.isTimeoutAbort(error)) {
+        if (args.debug) {
+          console.warn(
+            `[${this.name}] timeout abort model=${OPENAI_MODEL}`,
+            (error as Error)?.message
+          );
         }
-      }
-      throw lastError ?? new Error("AIの出力が途中で崩れました。もう一度撮って試してね。");
-    }
-
-    let latestFinalAnswer: string | undefined;
-    for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
-      const wantsEscalation = args.difficulty === "hard" || attempt > 0;
-      const modelToUse = wantsEscalation ? OPENAI_PRO_MODEL : OPENAI_MODEL;
-      const escalated = modelToUse !== OPENAI_MODEL;
-      debugInfo.escalated = escalated;
-      debugInfo.retries = attempt;
-      debugInfo.model = modelToUse;
-      pushModelTried(modelToUse);
-
-      try {
-        const planPrompt = createAnalysisPlanPrompt(args.problemText, args.difficulty);
-        const planRaw = await this.request(planPrompt, ANALYSIS_PLAN_SCHEMA, undefined, {
-          timeoutMs: TIMEOUT_PLAN_MS,
-          model: modelToUse,
-          context: "analysis plan",
+        return this.buildTimeoutResult({
+          problemText: args.problemText,
+          difficulty: args.difficulty,
+          debug: args.debug,
+          debugInfo,
+          timeoutContext: "single_shot",
         });
-        const planResult = this.parseJson<{ step_count: number; step_titles: string[] }>(
-          planRaw,
-          "openai analysis plan"
-        );
-
-        const stepCount = Math.max(1, Number(planResult?.step_count || 0));
-        const stepTitlesRaw = Array.isArray(planResult?.step_titles) ? planResult.step_titles : [];
-        const stepTitles = stepTitlesRaw.filter((title) => typeof title === "string");
-        const normalizedCount = Math.min(stepCount, stepTitles.length || stepCount);
-        const effectiveTitles =
-          stepTitles.length >= normalizedCount
-            ? stepTitles.slice(0, normalizedCount)
-            : Array.from({ length: normalizedCount }, (_, idx) => `ステップ${idx + 1}`);
-
-        let headerResult:
-          | { method_hint: { label: string; pitch: string }; final_answer: string }
-          | null = null;
-        try {
-          debugInfo.headerAttempts = Number(debugInfo.headerAttempts) + 1;
-          const headerPrompt = createAnalysisHeaderPrompt({
-            problemText: args.problemText,
-            difficulty: args.difficulty,
-            stepTitles: effectiveTitles,
-          });
-          debugInfo.headerInputChars = headerPrompt.length;
-          pushModelTried(modelToUse);
-          const headerRaw = await this.request(headerPrompt, ANALYSIS_HEADER_SCHEMA, undefined, {
-            timeoutMs: TIMEOUT_HEADER_MS,
-            model: modelToUse,
-            maxOutputTokens: OPENAI_FINAL_ANSWER_MAX_TOKENS,
-            context: "analysis header",
-          });
-          headerResult = this.parseJson<{
-            method_hint: { label: string; pitch: string };
-            final_answer: string;
-          }>(headerRaw, "openai analysis header");
-          latestFinalAnswer = headerResult?.final_answer;
-        } catch (headerError) {
-          if (this.isTimeoutAbort(headerError)) {
-            throw headerError;
-          }
-          console.warn(`[${this.name}] header generation failed, fallback to single-shot`, headerError);
-          headerResult = null;
-        }
-
-        let chunkSize = 4;
-        const stepsStart = Date.now();
-        let stepsModelOverride: string | null = null;
-        let stepsEscalated = false;
-        let steps: AnalysisResult["problems"][number]["steps"] = [];
-        const totalSteps = effectiveTitles.length;
-        const fullVerifyOptions = { needsJudgement };
-        let stepsRetryUsed = false;
-        let judgementRetryUsed = false;
-        let forceJudgementStep = false;
-        const buildStepsOnce = async (): Promise<AnalysisResult["problems"][number]["steps"] | null> => {
-          chunkSize = 4;
-          while (chunkSize >= 1) {
-            try {
-              const elapsedSteps = Date.now() - stepsStart;
-              if (elapsedSteps > TIMEOUT_STEPS_TOTAL_MS) {
-                (debugInfo as any).fallbackReason = "steps_total_timeout";
-                return null;
-              }
-              (debugInfo.stepsChunkHistory as number[]).push(chunkSize);
-              (debugInfo.chunkHistory as number[]).push(chunkSize);
-              const collected: AnalysisResult["problems"][number]["steps"] = [];
-              for (let i = 0; i < totalSteps; i += chunkSize) {
-                const slice = effectiveTitles.slice(i, i + chunkSize);
-                const startOrder = i + 1;
-                const endOrder = startOrder + slice.length - 1;
-                const chunkPrompt = createStepsChunkPrompt({
-                  problemText: args.problemText,
-                  difficulty: args.difficulty,
-                  stepTitles: slice,
-                  startOrder,
-                  endOrder,
-                });
-                const chunkPromptResolved =
-                  forceJudgementStep && endOrder === totalSteps
-                    ? `${chunkPrompt}\n\n【追加指示】最後のステップは「くらべて決める」内容にし、結論の断定はしない。`
-                    : chunkPrompt;
-                debugInfo.stepsChunkInputSize = chunkPrompt.length;
-                const stepsModelToUse = stepsModelOverride ?? modelToUse;
-                pushModelTried(stepsModelToUse);
-
-                const chunkRaw = await this.request(chunkPromptResolved, ANALYSIS_STEPS_CHUNK_SCHEMA, undefined, {
-                  timeoutMs: TIMEOUT_STEPS_MS,
-                  model: stepsModelToUse,
-                  context: `analysis steps ${startOrder}-${endOrder}`,
-                });
-                const chunkResult = this.parseJson<{ steps: AnalysisResult["problems"][number]["steps"] }>(
-                  chunkRaw,
-                  `openai steps ${startOrder}-${endOrder}`
-                );
-                const chunkSteps = Array.isArray(chunkResult?.steps) ? chunkResult.steps : [];
-                const verification = verifySteps(chunkSteps, {
-                  skipFinalStepCheck: true,
-                  needsJudgement,
-                });
-                if (!verification.ok) {
-                  (debugInfo as any).fallbackReason = "verify_failed";
-                  (debugInfo as any).verifyIssuesCount = verification.issues.length;
-                  (debugInfo as any).verifyIssuesTop3 = verification.issues.slice(0, 3);
-                  const err = new Error(`chunk_verify_failed:${verification.issues.join(",")}`);
-                  throw err;
-                }
-                collected.push(...chunkSteps);
-              }
-              normalizeStepOrders(collected, 1);
-              sanitizeAnswerLeakInSteps(collected);
-              ensureFinalCheckStep(collected);
-              let fullVerification = verifySteps(collected, fullVerifyOptions);
-              if (!fullVerification.ok && fullVerification.issues.includes("answer_leak_in_steps")) {
-                sanitizeAnswerLeakInSteps(collected);
-                fullVerification = verifySteps(collected, fullVerifyOptions);
-              }
-              if (!fullVerification.ok) {
-                (debugInfo as any).fallbackReason = "verify_failed";
-                (debugInfo as any).verifyIssuesCount = fullVerification.issues.length;
-                (debugInfo as any).verifyIssuesTop3 = fullVerification.issues.slice(0, 3);
-                if (!judgementRetryUsed && fullVerification.issues.includes("missing_judgement_step")) {
-                  judgementRetryUsed = true;
-                  forceJudgementStep = true;
-                  return null;
-                }
-                if (!stepsRetryUsed && fullVerification.issues.includes("duplicate_step_similarity")) {
-                  stepsRetryUsed = true;
-                  return null;
-                }
-                return null;
-              }
-              debugInfo.chunkSize = chunkSize;
-              debugInfo.stepsEscalated = stepsEscalated;
-              debugInfo.stepsModelFinal = stepsModelOverride ?? modelToUse;
-              return collected;
-            } catch (chunkError) {
-              if (this.isTimeoutAbort(chunkError)) {
-                throw chunkError;
-              }
-              const msg = String((chunkError as Error)?.message || "");
-              const isStepsTimeout = msg.includes("Timeout:") && msg.includes("analysis steps");
-              if (isStepsTimeout) {
-                (debugInfo as any).fallbackReason = "steps_chunk_timeout";
-              } else if (msg.includes("JSON") || msg.includes("parse")) {
-                (debugInfo as any).fallbackReason = "json_parse_failed";
-              } else if (!(debugInfo as any).fallbackReason) {
-                (debugInfo as any).fallbackReason = "steps_chunk_failed";
-              }
-              if (chunkSize === 1 && isStepsTimeout && !stepsEscalated) {
-                stepsEscalated = true;
-                stepsModelOverride = OPENAI_PRO_MODEL;
-                (debugInfo as any).stepsEscalated = true;
-                console.warn(`[${this.name}] steps chunk timeout at size=1; retrying with steps escalated model`);
-                continue;
-              }
-              console.warn(`[${this.name}] chunk generation failed, retrying with smaller chunk`, chunkError);
-              chunkSize = chunkSize === 4 ? 2 : chunkSize === 2 ? 1 : 0;
-            }
-          }
-          return null;
-        };
-        const stepsFirst = await buildStepsOnce();
-        steps = stepsFirst ?? [];
-        if (!steps.length && (stepsRetryUsed || judgementRetryUsed)) {
-          steps = (await buildStepsOnce()) ?? [];
-        }
-
-        debugInfo.stepsTotalMs = Date.now() - stepsStart;
-
-        if (!steps.length || !headerResult) {
-          if (!steps.length && !(debugInfo as any).fallbackReason) {
-            (debugInfo as any).fallbackReason = "steps_chunk_failed";
-          }
-          debugInfo.pipelinePath = "fallback_single_shot";
-          const prompt = createControlledAnalysisPrompt(args.problemText, args.difficulty);
-          const raw = await this.request(prompt, ANALYSIS_RESPONSE_SCHEMA, args.imageBase64, {
-            timeoutMs: TIMEOUT_FULL_MS,
-            model: modelToUse,
-            context: "controlled analysis",
-          });
-          console.log(`[${this.name}] raw model text (controlled analysis)`, raw);
-          const parsed = this.parseJson<AnalysisResult>(raw, "openai controlled analysis");
-          if (parsed?.problems?.[0]?.steps) {
-            sanitizeAnswerLeakInSteps(parsed.problems[0].steps);
-            ensureFinalCheckStep(parsed.problems[0].steps);
-          }
-          let verification = verifyAnalysis(parsed);
-          if (!verification.ok) {
-            if (verification.issues.some((issue) => issue.includes("answer_leak_in_steps"))) {
-              if (parsed?.problems?.[0]?.steps) {
-                sanitizeAnswerLeakInSteps(parsed.problems[0].steps);
-              }
-              verification = verifyAnalysis(parsed);
-            }
-            if (verification.ok) {
-              if ((debugInfo as any).verifyIssuesCount === undefined) {
-                (debugInfo as any).verifyIssuesCount = 0;
-                (debugInfo as any).verifyIssuesTop3 = [];
-              }
-              debugInfo.modelFinal = modelToUse;
-              debugInfo.totalMs = Date.now() - totalStart;
-              parsed._debug = { ...(parsed._debug ?? {}), ...debugInfo };
-              return parsed;
-            }
-            (debugInfo as any).verifyIssuesCount = verification.issues.length;
-            (debugInfo as any).verifyIssuesTop3 = verification.issues.slice(0, 3);
-            throw new Error(`analysis_verify_failed:${verification.issues.join(",")}`);
-          }
-          if ((debugInfo as any).verifyIssuesCount === undefined) {
-            (debugInfo as any).verifyIssuesCount = 0;
-            (debugInfo as any).verifyIssuesTop3 = [];
-          }
-          debugInfo.modelFinal = modelToUse;
-          debugInfo.totalMs = Date.now() - totalStart;
-          parsed._debug = { ...(parsed._debug ?? {}), ...debugInfo };
-          return parsed;
-        }
-
-        debugInfo.pipelinePath = "chunked";
-        debugInfo.modelFinal = modelToUse;
-        if ((debugInfo as any).fallbackReason) {
-          delete (debugInfo as any).fallbackReason;
-        }
-        const assembled: AnalysisResult = {
-          status: "success",
-          problems: [
-            {
-              id: createProblemId(),
-              problem_text: args.problemText,
-              steps,
-              final_answer: headerResult?.final_answer ?? "",
-              method_hint: headerResult?.method_hint ?? { label: "", pitch: "" },
-            },
-          ],
-          _debug: { ...debugInfo },
-        };
-
-        const verification = verifyAnalysis(assembled);
-        if (!verification.ok) {
-          (debugInfo as any).verifyIssuesCount = verification.issues.length;
-          (debugInfo as any).verifyIssuesTop3 = verification.issues.slice(0, 3);
-          throw new Error(`analysis_verify_failed:${verification.issues.join(",")}`);
-        }
-        if ((debugInfo as any).verifyIssuesCount === undefined) {
-          (debugInfo as any).verifyIssuesCount = 0;
-          (debugInfo as any).verifyIssuesTop3 = [];
-        }
-
-        debugInfo.totalMs = Date.now() - totalStart;
-        return assembled;
-      } catch (error) {
-        if (this.isTimeoutAbort(error)) {
-          if (args.debug) {
-            console.warn(
-              `[${this.name}] timeout abort attempt=${attempt}`,
-              (error as Error)?.message
-            );
-          }
-          return this.buildTimeoutResult({
-            problemText: args.problemText,
-            difficulty: args.difficulty,
-            finalAnswer: latestFinalAnswer,
-            debug: args.debug,
-            debugInfo,
-            timeoutContext: "chunked_or_fallback",
-          });
-        }
-        lastError = error;
-        console.warn(`[${this.name}] controlled analysis failed attempt=${attempt}`, error);
       }
+      throw error;
     }
-
-    throw lastError ?? new Error("AIの出力が途中で崩れました。もう一度撮って試してね。");
   }
 
   async analyzeFromText(
