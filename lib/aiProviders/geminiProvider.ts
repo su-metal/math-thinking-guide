@@ -10,12 +10,12 @@ import {
   PROBLEM_EXTRACTION_SCHEMA,
   ANALYSIS_PLAN_SCHEMA,
   ANALYSIS_STEPS_CHUNK_SCHEMA,
-  ANALYSIS_HEADER_SCHEMA,
   createControlledAnalysisPrompt,
   createDrillPrompt,
   createAnalysisPlanPrompt,
   createStepsChunkPrompt,
-  createAnalysisHeaderPrompt,
+  createFinalAnswerPrompt,
+  FINAL_ANSWER_SCHEMA,
 } from "./prompts";
 import {
   createProblemId,
@@ -139,6 +139,73 @@ export class GeminiProvider implements AIProvider {
     } finally {
       if (timer) clearTimeout(timer);
     }
+  }
+
+  private buildMethodHint(problemText: string): { label: string; pitch: string } {
+    const text = problemText ?? "";
+    const lower = text.toLowerCase();
+
+    const unitRateKeywords = ["あたり", "1人あたり", "一人あたり", "こんでいる", "みっしり"];
+    if (unitRateKeywords.some((k) => lower.includes(k))) {
+      return {
+        label: "分配算",
+        pitch: "比べたいときは、ちがう量をそのまま見くらべないで、同じ単位にそろえて考えると分かりやすいよ。",
+      };
+    }
+
+    if (lower.includes("%") || lower.includes("割合") || lower.includes("パーセント")) {
+      return {
+        label: "割合をそろえる",
+        pitch: "割合は基準をそろえると比べやすいよ。何を100%にするかを先に決めると進めやすい。",
+      };
+    }
+
+    if (lower.includes("比") || lower.includes("比例") || lower.includes("反比例")) {
+      return {
+        label: "くらべ方をそろえる",
+        pitch: "比べるときは、同じものさしにそろえてから見ると違いが分かりやすいよ。",
+      };
+    }
+
+    if (lower.includes("平均") || lower.includes("ならす")) {
+      return {
+        label: "平均の考え方",
+        pitch: "平均はみんなを同じにそろえる中心だよ。平均との差を考えると整理しやすい。",
+      };
+    }
+
+    return {
+      label: "情報を整理して、同じものさしで比べよう",
+      pitch: "比べたいときは、ちがう量をそのまま見くらべないで、同じ単位にそろえて考えると分かりやすいよ。",
+    };
+  }
+
+  private async generateFinalAnswer(
+    problemText: string,
+    pushModelTried: (model: string) => void
+  ): Promise<string> {
+    const prompt = createFinalAnswerPrompt(problemText);
+    const models = [GEMINI_SIMPLE_MODEL, GEMINI_COMPLEX_MODEL];
+    for (const model of models) {
+      try {
+        pushModelTried(model);
+        const result = await this.generateContent<{ final_answer: string }>({
+          contents: [{ text: prompt }],
+          schema: FINAL_ANSWER_SCHEMA,
+          context: "final answer",
+          model,
+          timeoutMs: TIMEOUT_HEADER_MS,
+        });
+        if (result?.final_answer) {
+          return result.final_answer;
+        }
+      } catch (error) {
+        if (model === GEMINI_COMPLEX_MODEL) {
+          throw error;
+        }
+      }
+    }
+    return "";
   }
 
   private async generateContent<T>(args: {
@@ -309,40 +376,7 @@ export class GeminiProvider implements AIProvider {
           effectiveTitles = [];
         }
 
-        let headerResult:
-          | { method_hint: { label: string; pitch: string }; final_answer: string }
-          | null = null;
-        if (!checkTotalTimeout()) {
-          const headerPrompt = createAnalysisHeaderPrompt({
-            problemText: args.problemText,
-            difficulty: args.difficulty,
-            stepTitles: effectiveTitles,
-          });
-          debugInfo.headerInputChars = headerPrompt.length;
-          const headerModels = [GEMINI_SIMPLE_MODEL, GEMINI_COMPLEX_MODEL];
-          for (const headerModel of headerModels) {
-            try {
-              debugInfo.headerAttempts = Number(debugInfo.headerAttempts) + 1;
-              pushModelTried(headerModel);
-              headerResult = await this.generateContent<{
-                method_hint: { label: string; pitch: string };
-                final_answer: string;
-              }>({
-                contents: [{ text: headerPrompt }],
-                schema: ANALYSIS_HEADER_SCHEMA,
-                context: "analysis header",
-                model: headerModel,
-                timeoutMs: TIMEOUT_HEADER_MS,
-              });
-              break;
-            } catch (headerError) {
-              headerResult = null;
-              if (headerModel === GEMINI_COMPLEX_MODEL) {
-                console.warn(`[${this.name}] header generation failed, fallback to single-shot`, headerError);
-              }
-            }
-          }
-        }
+        const methodHint = this.buildMethodHint(args.problemText);
 
         let chunkSize = 4;
         const stepsStart = Date.now();
@@ -547,25 +581,14 @@ export class GeminiProvider implements AIProvider {
               throw new Error(`short_steps_verify_failed:${shortStepsCheck.issues.join(",")}`);
             }
 
-            let finalHeader = headerResult;
-            if (!finalHeader) {
-              const headerPrompt = createAnalysisHeaderPrompt({
-                problemText: args.problemText,
-                difficulty: args.difficulty,
-                stepTitles: [],
-              });
-              debugInfo.headerInputChars = headerPrompt.length;
-              pushModelTried(GEMINI_SIMPLE_MODEL);
-              finalHeader = await this.generateContent<{
-                method_hint: { label: string; pitch: string };
-                final_answer: string;
-              }>({
-                contents: [{ text: headerPrompt }],
-                schema: ANALYSIS_HEADER_SCHEMA,
-                context: "analysis header short",
-                model: GEMINI_SIMPLE_MODEL,
-                timeoutMs: Math.min(TIMEOUT_HEADER_MS, 8_000),
-              });
+            let finalAnswer = "";
+            if (!checkTotalTimeout()) {
+              debugInfo.headerAttempts = Number(debugInfo.headerAttempts) + 1;
+              debugInfo.headerInputChars = createFinalAnswerPrompt(args.problemText).length;
+              finalAnswer = await this.generateFinalAnswer(args.problemText, pushModelTried);
+            }
+            if (!finalAnswer) {
+              throw new Error("final_answer_missing");
             }
 
             debugInfo.pipelinePath = "total_timeout_short";
@@ -580,8 +603,8 @@ export class GeminiProvider implements AIProvider {
                   id: createProblemId(),
                   problem_text: args.problemText,
                   steps: shortSteps,
-                  final_answer: finalHeader?.final_answer ?? "",
-                  method_hint: finalHeader?.method_hint ?? { label: "", pitch: "" },
+                  final_answer: finalAnswer,
+                  method_hint: methodHint,
                 },
               ],
               _debug: { ...debugInfo },
@@ -592,7 +615,12 @@ export class GeminiProvider implements AIProvider {
           }
         }
 
-        if (!steps.length || !headerResult) {
+        const finalAnswer =
+          !checkTotalTimeout()
+            ? await this.generateFinalAnswer(args.problemText, pushModelTried)
+            : "";
+
+        if (!steps.length || !finalAnswer) {
           if (!steps.length && !(debugInfo as any).fallbackReason) {
             (debugInfo as any).fallbackReason = "steps_chunk_failed";
           }
@@ -644,8 +672,8 @@ export class GeminiProvider implements AIProvider {
               id: createProblemId(),
               problem_text: args.problemText,
               steps,
-              final_answer: headerResult?.final_answer ?? "",
-              method_hint: headerResult?.method_hint ?? { label: "", pitch: "" },
+              final_answer: finalAnswer,
+              method_hint: methodHint,
             },
           ],
           _debug: { ...debugInfo },

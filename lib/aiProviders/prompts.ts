@@ -756,21 +756,40 @@ export function createAnalysisHeaderPrompt(args: {
 
   return `
 「考え方ヒント」と「最終回答」だけを作成します。
-method_hint は必須で、label と pitch は辞書の文をそのまま使います。
+method_hint は必須で、短い一般テンプレで作成します（辞書参照は禁止）。
 final_answer は「答え：」と「【理由】」の形で、会話調で短くまとめます。
 
 【制御情報】
 - 難易度: ${difficulty}
 - ${VOCABULARY_RULES[difficulty]}
 
-【辞書】
-${METHOD_DICT_V1_1}
-
 【ステップ要点】
 ${titles}
 
 【出力(JSONのみ)】
-{ "method_hint": { "label": "辞書のlabelそのまま", "pitch": "辞書のpitchそのまま" }, "final_answer": "答え：...\\n\\n【理由】..." }
+{ "method_hint": { "label": "短い見出し", "pitch": "やさしい一文ヒント" }, "final_answer": "答え：...\\n\\n【理由】..." }
+
+【問題文】
+${problemText}
+`.trim();
+}
+
+export const FINAL_ANSWER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    final_answer: { type: "string" },
+  },
+  required: ["final_answer"],
+};
+
+export function createFinalAnswerPrompt(problemText: string) {
+  return `
+算数の問題の最終回答だけを作成してください。
+「答え：」と「【理由】」の形で、会話調で短くまとめます。
+
+【出力(JSONのみ)】
+{ "final_answer": "答え：...\\n\\n【理由】..." }
 
 【問題文】
 ${problemText}
