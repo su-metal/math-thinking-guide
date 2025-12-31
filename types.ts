@@ -40,6 +40,19 @@ export interface MathProblem {
 export interface AnalysisResult {
   status: "success" | "error";
   problems: MathProblem[];
+  meta?: {
+    difficulty: "easy" | "normal" | "hard";
+    tags: string[];
+    confidence: number;
+    signals: Record<string, unknown>;
+  };
+  _debug?: {
+    provider?: string;
+    escalated?: boolean;
+    retries?: number;
+    chunkSize?: number;
+    model?: string;
+  };
 }
 
 export interface DrillProblem {

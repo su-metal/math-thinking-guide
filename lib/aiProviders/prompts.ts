@@ -298,7 +298,7 @@ export const ANALYSIS_PROMPT = `
 - 単位は数字の直後に続けて書く（例: 15km2 や 15平方キロメートル のどちらかに統一。混在禁止）
 
 【前のステップの振り返り表現ルール（全ステップ共通）】
-- 前のステップの結果を伝えるときは、数値や式だけで終わらせない。
+- 前のステップの結果を伝えるときは、数値や式で表さない。
 - 文の最後に、文脈に合った短い問いかけを1つ添える。
 - 問いかけは確認・安心を与えるものとし、答えを強要しない。
   例：「どうかな？」「ここまで大丈夫そうかな？」「分かったかな？」
@@ -322,57 +322,10 @@ export const ANALYSIS_PROMPT = `
 ・特定の操作や数値に結びつかないこと
 を必須条件とする。
 
-【計算法辞書（参照データ）】
-以下のJSONは「問題の見立て（考え方の方針）」に使う参照辞書です。
-
-- この辞書を読み取り、最も近い entries[].id を 1つ選びなさい
-- 解法名を断定的に教えるためではなく、「考え方の方向性」を示すために使います
-- hint や step 内で「〇〇算の出番だね」など、名称を直接教えてはいけません
-- UI表示用として、必ず method_hint を problems[0] に含めて返してください
-- 該当が曖昧な場合でも、最も近いものを 1つ必ず選んでください
-
-${METHOD_DICT_V1_1}
-
-【method_hint の出力ルール（重要・厳守）】
-
-- method_hint は必須項目です（省略不可）
-- 出力形式は最低限 label と pitch は必須。追加フィールドは出力例に従う
-
-"method_hint": {
-  "label": "辞書 entries[].label をそのまま使用",
-  "pitch": "辞書 entries[].pitch を1文字も変えずにそのまま使用"
-}
-
-【追加：bridge（問題向けの1文補足）ルール】
-
-- method_hint.bridge は任意だが、可能な限り付ける
-- bridge は「この問題がなぜその考え方に合うのか」を、問題文の言葉を使って1文で説明する
-- bridge では計算や具体的な操作（〇÷△、最大公約数を出す 等）に触れない
-- bridge の文末は、子供に安心を与える軽い問いかけで終える（例: そうだね。どうかな？）
-- pitch は辞書 entries[].pitch を1文字も変えずに必ずそのまま返す（固定ルールは維持）
-
-出力例:
-
-"method_hint": {
-  "method_id": "entries[].id をそのまま使用",
-  "label": "辞書 entries[].label をそのまま使用",
-  "pitch": "辞書 entries[].pitch を1文字も変えずにそのまま使用",
-  "bridge": "この問題向けの補足1文（計算なし）"
-}
-
-
-【禁止事項】
-- pitch の要約・言い換え・語尾変更・句読点変更
-- 独自に文章を生成すること
-- label や pitch を空にすること
-
-※ 辞書の文章をコピーしてそのまま返すこと。
-※ 判断に迷っても、最も近いものを必ず1つ選ぶこと。
 
 【制約】
 ・特定の問題タイプ（比較・計算・図形など）に依存する表現を使わない
-・途中計算や一時的な数値の確認はしてよい
-・ただし、問題で聞かれている「最終的な答え」を断定してはいけない
+・問題で聞かれている「最終的な答え」を断定してはいけない
 ・「つまり〇〇人」「これが答えだよ」「人口密度は〇〇だね」などの結論表現は禁止
 ・最終的な答えは、final_answer フィールドでのみ提示する
 ・次のステップで何をするかを確定させない
@@ -413,6 +366,7 @@ ${METHOD_DICT_V1_1}
 
 - 複数の量を比べて結論を出す問題では、計算がすべて終わったあとに、
   「結果を並べて比べ、意味を整理するためのステップ」を必ず1つ設けてください。
+- 特定の値を求める問題では、
 - このステップでは新しい計算を行ってはいけません。
 - 数字の大小関係や意味（どちらが多い・こんでいる等）を言葉で確認し、
   子供が自分で結論にたどり着ける問いかけを含めてください。
@@ -480,7 +434,7 @@ ${METHOD_DICT_V1_1}
   }
 ],
 
-      "final_answer": "答え：2組\\n\\n【理由】1組は2.5個、2組は3個なので2組の方が多いからです。"
+      "final_answer": "答え：500人\\n\\n【理由】30000人の人口を60平方キロメートルの面積で等しく分ける（30000÷500）と、1平方キロメートルあたり500人になるからです。"
     }
   ]
 }
@@ -554,6 +508,71 @@ export const ANALYSIS_RESPONSE_SCHEMA = {
     },
   },
   required: ["status", "problems"],
+};
+
+export const ANALYSIS_PLAN_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    step_count: { type: "integer" },
+    step_titles: {
+      type: "array",
+      items: { type: "string" },
+    },
+  },
+  required: ["step_count", "step_titles"],
+};
+
+export const ANALYSIS_STEPS_CHUNK_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    steps: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          order: { type: "integer" },
+          hint: { type: "string" },
+          solution: { type: "string" },
+
+          // 任意で見られる途中計算（表示トグル用）
+          calculation: {
+            type: "object",
+            additionalProperties: false,
+            properties: {
+              expression: { type: "string" }, // 例: "3600 ÷ 15"
+              result: { type: "number" },     // 例: 240
+              unit: { type: "string" },       // 例: "人/平方キロメートル"
+              note: { type: "string" },       // 任意: 説明
+            },
+            required: ["expression", "result"],
+          },
+        },
+        required: ["order", "hint", "solution"],
+      },
+    },
+  },
+  required: ["steps"],
+};
+
+export const ANALYSIS_HEADER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    method_hint: {
+      type: "object",
+      additionalProperties: false,
+      properties: {
+        label: { type: "string" },
+        pitch: { type: "string" },
+      },
+      required: ["label", "pitch"],
+    },
+    final_answer: { type: "string" },
+  },
+  required: ["method_hint", "final_answer"],
 };
 
 
@@ -635,4 +654,103 @@ export function createControlledAnalysisPrompt(problemText: string, difficulty: 
 【問題文】
 ${problemText}
 `;
+}
+
+export function createAnalysisPlanPrompt(problemText: string, difficulty: Difficulty) {
+  return `
+あなたは算数問題のステップ構成だけを考える役割です。
+計算の式や答えは書かず、考え方の流れだけを短く整理してください。
+ステップ数の上限は固定しません。難しさに応じて必要な数だけ作ってください。
+
+【制御情報】
+- 難易度: ${difficulty}
+- ${STEP_COUNT_RULES[difficulty]}
+- Separation Rule（1ステップ＝1対象）は厳守。
+
+【出力形式(JSONのみ)】
+{
+  "step_count": 数字,
+  "step_titles": ["ステップごとの要点を短く", "..."]
+}
+
+【問題文】
+${problemText}
+`.trim();
+}
+
+export function createStepsChunkPrompt(args: {
+  problemText: string;
+  difficulty: Difficulty;
+  stepTitles: string[];
+  startOrder: number;
+  endOrder: number;
+}) {
+  const { problemText, difficulty, stepTitles, startOrder, endOrder } = args;
+  return `
+あなたは算数コーチとして、指定された範囲のステップだけを作成します。
+命令口調や講義口調は避け、やさしい会話調で書いてください。
+hint では具体的な式や答えを言わず、着眼点と作戦だけを示します。
+solution には式や計算結果を書かず、意味づけと短い問いかけだけを書きます。
+calculation を出す場合は expression と result を必ず入れます。
+
+【制御情報】
+- 難易度: ${difficulty}
+- ${STEP_COUNT_RULES[difficulty]}
+- ${VOCABULARY_RULES[difficulty]}
+- Separation Rule（1ステップ＝1対象）は厳守。
+
+【この範囲のステップ要点】
+${stepTitles.map((t, idx) => `${startOrder + idx}. ${t}`).join("\n")}
+
+【出力形式(JSONのみ)】
+{
+  "steps": [
+    {
+      "order": ${startOrder} から ${endOrder} の連番,
+      "hint": "...",
+      "solution": "...",
+      "calculation": { "expression": "...", "result": 0, "unit": "...", "note": "..." }
+    }
+  ]
+}
+
+【問題文】
+${problemText}
+`.trim();
+}
+
+export function createAnalysisHeaderPrompt(args: {
+  problemText: string;
+  difficulty: Difficulty;
+  stepTitles?: string[];
+}) {
+  const { problemText, difficulty, stepTitles } = args;
+  const titles = Array.isArray(stepTitles) && stepTitles.length > 0
+    ? stepTitles.map((t, idx) => `${idx + 1}. ${t}`).join("\n")
+    : "";
+
+  return `
+あなたは算数問題の「考え方ヒント」と「最終回答」だけを作成します。
+method_hint は必須で、label と pitch は辞書の文をそのまま使います。
+final_answer は「答え：」と「【理由】」の形で、会話調で短くまとめてください。
+
+【制御情報】
+- 難易度: ${difficulty}
+- ${VOCABULARY_RULES[difficulty]}
+
+【計算法辞書】
+${METHOD_DICT_V1_1}
+
+【ステップの要点（短く）】
+${titles}
+
+【出力形式(JSONのみ)】
+{
+  "method_hint": { "label": "辞書のlabelそのまま", "pitch": "辞書のpitchそのまま" },
+  "final_answer": "答え：...\\n\\n【理由】..."
+}
+
+【問題文】
+${problemText}
+`.trim();
 }

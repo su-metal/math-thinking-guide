@@ -1,11 +1,30 @@
 import { NextResponse } from "next/server";
 import { getAIProvider } from "@/lib/aiProviders/provider";
 import { estimateLevel } from "@/lib/levelEstimator";
+import { computeExpression } from "@/lib/math/computeExpression";
+import type { AnalysisResult } from "@/types";
 
 const DEFAULT_ERROR_MESSAGE =
   "AIが問題を読み取れませんでした。明るい場所でもういちど撮ってみてね。";
 
 const provider = getAIProvider();
+
+const applyCalculationOverrides = (result: AnalysisResult) => {
+  if (!result || !Array.isArray(result.problems)) return;
+  for (const problem of result.problems) {
+    if (!problem || !Array.isArray(problem.steps)) continue;
+    for (const step of problem.steps) {
+      const calc = step?.calculation;
+      if (!calc || typeof calc.expression !== "string") continue;
+      const computed = computeExpression(calc.expression);
+      if (typeof computed === "number") {
+        calc.result = computed;
+      } else {
+        delete step.calculation;
+      }
+    }
+  }
+};
 
 export async function POST(req: Request) {
   console.log("[/api/analyze] content-type:", req.headers.get("content-type"));
@@ -48,9 +67,17 @@ export async function POST(req: Request) {
 
     finalResult.meta = mergedMeta;
 
+    applyCalculationOverrides(finalResult as AnalysisResult);
+
     // debug=true のときだけ provider名を付与（型を壊さず最低限）
     if (debug) {
-      finalResult._debug = { provider: provider.name };
+      const existingDebug =
+        finalResult && typeof finalResult._debug === "object" && finalResult._debug !== null
+          ? finalResult._debug
+          : {};
+      finalResult._debug = { ...existingDebug, provider: provider.name };
+    } else if (finalResult?._debug) {
+      delete finalResult._debug;
     }
 
     return NextResponse.json(finalResult);

@@ -6,12 +6,32 @@ import {
   DRILL_RESPONSE_SCHEMA,
   PROBLEM_EXTRACTION_PROMPT,
   PROBLEM_EXTRACTION_SCHEMA,
+  ANALYSIS_PLAN_SCHEMA,
+  ANALYSIS_STEPS_CHUNK_SCHEMA,
+  ANALYSIS_HEADER_SCHEMA,
   createControlledAnalysisPrompt,
   createDrillPrompt,
+  createAnalysisPlanPrompt,
+  createStepsChunkPrompt,
+  createAnalysisHeaderPrompt,
 } from "./prompts";
+import {
+  createProblemId,
+  normalizeStepOrders,
+  verifyAnalysis,
+  verifySteps,
+} from "./analysisUtils";
 
 const OPENAI_URL = "https://api.openai.com/v1/responses";
 const OPENAI_MODEL = "gpt-5-mini-2025-08-07";
+const OPENAI_PRO_MODEL = process.env.OPENAI_PRO_MODEL || OPENAI_MODEL;
+const OPENAI_MAX_OUTPUT_TOKENS = Number(process.env.OPENAI_MAX_OUTPUT_TOKENS ?? "0") || undefined;
+
+const TIMEOUT_PLAN_MS = 10_000;
+const TIMEOUT_HEADER_MS = 25_000;
+const TIMEOUT_STEPS_MS = 15_000;
+const TIMEOUT_FULL_MS = 30_000;
+const MAX_RETRIES = 2;
 
 export class OpenAIProvider implements AIProvider {
   readonly name = "openai";
@@ -22,7 +42,12 @@ export class OpenAIProvider implements AIProvider {
     }
   }
 
-  private async request(prompt: string, schema: object, imageDataUrl?: string): Promise<string> {
+  private async request(
+    prompt: string,
+    schema: object,
+    imageDataUrl?: string,
+    options?: { timeoutMs?: number; model?: string }
+  ): Promise<string> {
     const content: any[] = [{ type: "input_text", text: prompt }];
 
     // 画像がある場合は "image_url" として渡す（data:image/...;base64,... のままOK）
@@ -34,7 +59,7 @@ export class OpenAIProvider implements AIProvider {
     }
 
     const payload: any = {
-      model: OPENAI_MODEL,
+      model: options?.model || OPENAI_MODEL,
       input: [
         {
           role: "user",
@@ -49,8 +74,16 @@ export class OpenAIProvider implements AIProvider {
           schema,
         },
       },
+      ...(OPENAI_MAX_OUTPUT_TOKENS ? { max_output_tokens: OPENAI_MAX_OUTPUT_TOKENS } : {}),
       // gpt-5-mini は temperature 非対応なので入れない
     };
+
+    const controller = typeof AbortController !== "undefined" ? new AbortController() : undefined;
+    const timeoutMs = options?.timeoutMs ?? 0;
+    const timeoutId =
+      controller && timeoutMs
+        ? setTimeout(() => controller.abort(), timeoutMs)
+        : undefined;
 
     const response = await fetch(OPENAI_URL, {
       method: "POST",
@@ -59,7 +92,9 @@ export class OpenAIProvider implements AIProvider {
         Authorization: `Bearer ${this.apiKey}`,
       },
       body: JSON.stringify(payload),
+      signal: controller?.signal,
     });
+    if (timeoutId) clearTimeout(timeoutId);
 
     if (!response.ok) {
       const body = await response.text();
@@ -125,15 +160,148 @@ export class OpenAIProvider implements AIProvider {
     problemText: string;
     difficulty: "easy" | "normal" | "hard";
   }): Promise<AnalysisResult> {
-    const prompt = createControlledAnalysisPrompt(args.problemText, args.difficulty);
-    const raw = await this.request(prompt, ANALYSIS_RESPONSE_SCHEMA, args.imageBase64);
-    console.log(`[${this.name}] raw model text (controlled analysis)`, raw);
-    const parsed = this.parseJson<AnalysisResult>(raw, "openai controlled analysis");
-    console.log(`[${this.name}] parsed controlled result method_hint`, parsed?.problems?.[0]?.method_hint);
-    if (!parsed?.problems?.[0]?.method_hint?.pitch) {
-      console.warn(`[${this.name}] method_hint missing in controlled response`);
+    const debugInfo: Record<string, unknown> = {
+      headerTimeoutMs: TIMEOUT_HEADER_MS,
+      headerAttempts: 0,
+    };
+    let lastError: unknown;
+
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+      const escalated = args.difficulty === "hard" || attempt > 0;
+      const modelToUse = escalated ? OPENAI_PRO_MODEL : OPENAI_MODEL;
+      debugInfo.escalated = escalated;
+      debugInfo.retries = attempt;
+      debugInfo.model = modelToUse;
+
+      try {
+        const planPrompt = createAnalysisPlanPrompt(args.problemText, args.difficulty);
+        const planRaw = await this.request(planPrompt, ANALYSIS_PLAN_SCHEMA, undefined, {
+          timeoutMs: TIMEOUT_PLAN_MS,
+          model: modelToUse,
+        });
+        const planResult = this.parseJson<{ step_count: number; step_titles: string[] }>(
+          planRaw,
+          "openai analysis plan"
+        );
+
+        const stepCount = Math.max(1, Number(planResult?.step_count || 0));
+        const stepTitlesRaw = Array.isArray(planResult?.step_titles) ? planResult.step_titles : [];
+        const stepTitles = stepTitlesRaw.filter((title) => typeof title === "string");
+        const normalizedCount = Math.min(stepCount, stepTitles.length || stepCount);
+        const effectiveTitles =
+          stepTitles.length >= normalizedCount
+            ? stepTitles.slice(0, normalizedCount)
+            : Array.from({ length: normalizedCount }, (_, idx) => `ステップ${idx + 1}`);
+
+        let headerResult:
+          | { method_hint: { label: string; pitch: string }; final_answer: string }
+          | null = null;
+        try {
+          debugInfo.headerAttempts = Number(debugInfo.headerAttempts) + 1;
+          const headerPrompt = createAnalysisHeaderPrompt({
+            problemText: args.problemText,
+            difficulty: args.difficulty,
+            stepTitles: effectiveTitles,
+          });
+          debugInfo.headerInputChars = headerPrompt.length;
+          const headerRaw = await this.request(headerPrompt, ANALYSIS_HEADER_SCHEMA, undefined, {
+            timeoutMs: TIMEOUT_HEADER_MS,
+            model: modelToUse,
+          });
+          headerResult = this.parseJson<{
+            method_hint: { label: string; pitch: string };
+            final_answer: string;
+          }>(headerRaw, "openai analysis header");
+        } catch (headerError) {
+          console.warn(`[${this.name}] header generation failed, fallback to single-shot`, headerError);
+          headerResult = null;
+        }
+
+        let chunkSize = 4;
+        let steps: AnalysisResult["problems"][number]["steps"] = [];
+        while (chunkSize >= 1) {
+          try {
+            const collected: AnalysisResult["problems"][number]["steps"] = [];
+            for (let i = 0; i < effectiveTitles.length; i += chunkSize) {
+              const slice = effectiveTitles.slice(i, i + chunkSize);
+              const startOrder = i + 1;
+              const endOrder = startOrder + slice.length - 1;
+              const chunkPrompt = createStepsChunkPrompt({
+                problemText: args.problemText,
+                difficulty: args.difficulty,
+                stepTitles: slice,
+                startOrder,
+                endOrder,
+              });
+
+              const chunkRaw = await this.request(chunkPrompt, ANALYSIS_STEPS_CHUNK_SCHEMA, undefined, {
+                timeoutMs: TIMEOUT_STEPS_MS,
+                model: modelToUse,
+              });
+              const chunkResult = this.parseJson<{ steps: AnalysisResult["problems"][number]["steps"] }>(
+                chunkRaw,
+                `openai steps ${startOrder}-${endOrder}`
+              );
+              const chunkSteps = Array.isArray(chunkResult?.steps) ? chunkResult.steps : [];
+              const verification = verifySteps(chunkSteps);
+              if (!verification.ok) {
+                throw new Error(`chunk_verify_failed:${verification.issues.join(",")}`);
+              }
+              collected.push(...chunkSteps);
+            }
+            normalizeStepOrders(collected, 1);
+            steps = collected;
+            debugInfo.chunkSize = chunkSize;
+            break;
+          } catch (chunkError) {
+            console.warn(`[${this.name}] chunk generation failed, retrying with smaller chunk`, chunkError);
+            chunkSize = chunkSize === 4 ? 2 : chunkSize === 2 ? 1 : 0;
+          }
+        }
+
+        if (!steps.length || !headerResult) {
+          const prompt = createControlledAnalysisPrompt(args.problemText, args.difficulty);
+          const raw = await this.request(prompt, ANALYSIS_RESPONSE_SCHEMA, args.imageBase64, {
+            timeoutMs: TIMEOUT_FULL_MS,
+            model: modelToUse,
+          });
+          console.log(`[${this.name}] raw model text (controlled analysis)`, raw);
+          const parsed = this.parseJson<AnalysisResult>(raw, "openai controlled analysis");
+          const verification = verifyAnalysis(parsed);
+          if (!verification.ok) {
+            throw new Error(`analysis_verify_failed:${verification.issues.join(",")}`);
+          }
+          parsed._debug = { ...(parsed._debug ?? {}), ...debugInfo };
+          return parsed;
+        }
+
+        const assembled: AnalysisResult = {
+          status: "success",
+          problems: [
+            {
+              id: createProblemId(),
+              problem_text: args.problemText,
+              steps,
+              final_answer: headerResult?.final_answer ?? "",
+              method_hint: headerResult?.method_hint ?? { label: "", pitch: "" },
+            },
+          ],
+          _debug: { ...debugInfo },
+        };
+
+        const verification = verifyAnalysis(assembled);
+        if (!verification.ok) {
+          throw new Error(`analysis_verify_failed:${verification.issues.join(",")}`);
+        }
+
+        return assembled;
+      } catch (error) {
+        lastError = error;
+        console.warn(`[${this.name}] controlled analysis failed attempt=${attempt}`, error);
+      }
     }
-    return parsed;
+
+    throw lastError ?? new Error("AIの出力が途中で崩れました。もう一度撮って試してね。");
   }
 
   async generateDrill(originalProblem: string): Promise<DrillResult> {

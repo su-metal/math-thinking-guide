@@ -8,9 +8,21 @@ import {
   DRILL_RESPONSE_SCHEMA,
   PROBLEM_EXTRACTION_PROMPT,
   PROBLEM_EXTRACTION_SCHEMA,
+  ANALYSIS_PLAN_SCHEMA,
+  ANALYSIS_STEPS_CHUNK_SCHEMA,
+  ANALYSIS_HEADER_SCHEMA,
   createControlledAnalysisPrompt,
   createDrillPrompt,
+  createAnalysisPlanPrompt,
+  createStepsChunkPrompt,
+  createAnalysisHeaderPrompt,
 } from "./prompts";
+import {
+  createProblemId,
+  normalizeStepOrders,
+  verifyAnalysis,
+  verifySteps,
+} from "./analysisUtils";
 
 /**
  * モデル切替ポリシー
@@ -20,10 +32,18 @@ import {
  *
  * 環境変数があればそちらを優先
  */
-const GEMINI_SIMPLE_MODEL = process.env.GEMINI_SIMPLE_MODEL || "gemini-2.5-flash";
+const GEMINI_SIMPLE_MODEL = process.env.GEMINI_SIMPLE_MODEL || "gemini-3-flash-preview";
 const GEMINI_COMPLEX_MODEL =
-  process.env.GEMINI_COMPLEX_MODEL || "gemini-2.5-flash";
-const GEMINI_ROUTER_MODEL = process.env.GEMINI_ROUTER_MODEL || "gemini-2.5-flash";
+  process.env.GEMINI_COMPLEX_MODEL || "gemini-3-flash-preview";
+const GEMINI_ROUTER_MODEL = process.env.GEMINI_ROUTER_MODEL || "gemini-3-flash-preview";
+const GEMINI_PRO_MODEL = process.env.GEMINI_PRO_MODEL || GEMINI_COMPLEX_MODEL;
+const GEMINI_MAX_OUTPUT_TOKENS = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS ?? "0") || undefined;
+
+const TIMEOUT_PLAN_MS = 10_000;
+const TIMEOUT_HEADER_MS = 25_000;
+const TIMEOUT_STEPS_MS = 15_000;
+const TIMEOUT_FULL_MS = 30_000;
+const MAX_RETRIES = 2;
 
 // ルーティング用の超小さいスキーマ
 const ROUTE_SCHEMA = {
@@ -104,6 +124,19 @@ export class GeminiProvider implements AIProvider {
     }
   }
 
+  private async withTimeout<T>(promise: Promise<T>, timeoutMs: number, context: string): Promise<T> {
+    if (!timeoutMs) return promise;
+    let timer: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Timeout: ${context}`)), timeoutMs);
+    });
+    try {
+      return await Promise.race([promise, timeoutPromise]);
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   private async generateContent<T>(args: {
     contents: Parameters<GoogleGenAI["models"]["generateContent"]>[0]["contents"];
     schema: Parameters<
@@ -111,18 +144,24 @@ export class GeminiProvider implements AIProvider {
     >[0]["config"]["responseSchema"];
     context: string;
     model?: string;
+    timeoutMs?: number;
   }): Promise<T> {
     this.ensureKey();
 
     const ai = new GoogleGenAI({ apiKey: this.apiKey! });
-    const response = await ai.models.generateContent({
-      model: args.model || GEMINI_COMPLEX_MODEL,
-      contents: args.contents,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: args.schema,
-      },
-    });
+    const response = await this.withTimeout(
+      ai.models.generateContent({
+        model: args.model || GEMINI_COMPLEX_MODEL,
+        contents: args.contents,
+        config: {
+          responseMimeType: "application/json",
+          responseSchema: args.schema,
+          ...(GEMINI_MAX_OUTPUT_TOKENS ? { maxOutputTokens: GEMINI_MAX_OUTPUT_TOKENS } : {}),
+        },
+      }),
+      args.timeoutMs ?? 0,
+      args.context
+    );
 
     const rawText = response.text ?? "";
     console.log(`[${this.name}] raw model text (${args.context})`, rawText);
@@ -200,31 +239,160 @@ export class GeminiProvider implements AIProvider {
     this.ensureKey();
     const inlineImage = args.imageBase64.split(",")[1] || args.imageBase64;
     const mimeType = this.detectMimeType(args.imageBase64);
-    const prompt = createControlledAnalysisPrompt(args.problemText, args.difficulty);
+    const debugInfo: Record<string, unknown> = {
+      headerTimeoutMs: TIMEOUT_HEADER_MS,
+      headerAttempts: 0,
+    };
 
-    const rawResult = await this.generateContent<AnalysisResult>({
-      contents: [
-        { text: prompt },
-        {
-          inlineData: {
-            mimeType,
-            data: inlineImage,
-          },
-        },
-      ],
-      schema: ANALYSIS_RESPONSE_SCHEMA,
-      context: `controlled analysis difficulty=${args.difficulty}`,
-      model: GEMINI_COMPLEX_MODEL,
-    });
+    let lastError: unknown;
+    for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
+      const escalated = args.difficulty === "hard" || attempt > 0;
+      const modelToUse = escalated ? GEMINI_PRO_MODEL : GEMINI_COMPLEX_MODEL;
+      debugInfo.escalated = escalated;
+      debugInfo.retries = attempt;
+      debugInfo.model = modelToUse;
 
-    console.log(`[${this.name}] controlled difficulty=${args.difficulty} result`, rawResult);
-    console.log(`[${this.name}] parsed result method_hint`, rawResult?.problems?.[0]?.method_hint);
+      try {
+        const planPrompt = createAnalysisPlanPrompt(args.problemText, args.difficulty);
+        const planResult = await this.generateContent<{ step_count: number; step_titles: string[] }>({
+          contents: [{ text: planPrompt }],
+          schema: ANALYSIS_PLAN_SCHEMA,
+          context: "analysis plan",
+          model: modelToUse,
+          timeoutMs: TIMEOUT_PLAN_MS,
+        });
 
-    if (!rawResult?.problems?.[0]?.method_hint?.pitch) {
-      console.warn(`[${this.name}] method_hint missing in controlled response`);
+        const stepCount = Math.max(1, Number(planResult?.step_count || 0));
+        const stepTitlesRaw = Array.isArray(planResult?.step_titles) ? planResult.step_titles : [];
+        const stepTitles = stepTitlesRaw.filter((title) => typeof title === "string");
+        const normalizedCount = Math.min(stepCount, stepTitles.length || stepCount);
+        const effectiveTitles =
+          stepTitles.length >= normalizedCount
+            ? stepTitles.slice(0, normalizedCount)
+            : Array.from({ length: normalizedCount }, (_, idx) => `ステップ${idx + 1}`);
+
+        let headerResult:
+          | { method_hint: { label: string; pitch: string }; final_answer: string }
+          | null = null;
+        try {
+          debugInfo.headerAttempts = Number(debugInfo.headerAttempts) + 1;
+          const headerPrompt = createAnalysisHeaderPrompt({
+            problemText: args.problemText,
+            difficulty: args.difficulty,
+            stepTitles: effectiveTitles,
+          });
+          debugInfo.headerInputChars = headerPrompt.length;
+          headerResult = await this.generateContent<{
+            method_hint: { label: string; pitch: string };
+            final_answer: string;
+          }>({
+            contents: [{ text: headerPrompt }],
+            schema: ANALYSIS_HEADER_SCHEMA,
+            context: "analysis header",
+            model: modelToUse,
+            timeoutMs: TIMEOUT_HEADER_MS,
+          });
+        } catch (headerError) {
+          console.warn(`[${this.name}] header generation failed, fallback to single-shot`, headerError);
+          headerResult = null;
+        }
+
+        let chunkSize = 4;
+        let steps: AnalysisResult["problems"][number]["steps"] = [];
+        while (chunkSize >= 1) {
+          try {
+            const collected: AnalysisResult["problems"][number]["steps"] = [];
+            for (let i = 0; i < effectiveTitles.length; i += chunkSize) {
+              const slice = effectiveTitles.slice(i, i + chunkSize);
+              const startOrder = i + 1;
+              const endOrder = startOrder + slice.length - 1;
+              const chunkPrompt = createStepsChunkPrompt({
+                problemText: args.problemText,
+                difficulty: args.difficulty,
+                stepTitles: slice,
+                startOrder,
+                endOrder,
+              });
+
+              const chunkResult = await this.generateContent<{ steps: AnalysisResult["problems"][number]["steps"] }>({
+                contents: [{ text: chunkPrompt }],
+                schema: ANALYSIS_STEPS_CHUNK_SCHEMA,
+                context: `analysis steps ${startOrder}-${endOrder}`,
+                model: modelToUse,
+                timeoutMs: TIMEOUT_STEPS_MS,
+              });
+
+              const chunkSteps = Array.isArray(chunkResult?.steps) ? chunkResult.steps : [];
+              const verification = verifySteps(chunkSteps);
+              if (!verification.ok) {
+                throw new Error(`chunk_verify_failed:${verification.issues.join(",")}`);
+              }
+              collected.push(...chunkSteps);
+            }
+            normalizeStepOrders(collected, 1);
+            steps = collected;
+            debugInfo.chunkSize = chunkSize;
+            break;
+          } catch (chunkError) {
+            console.warn(`[${this.name}] chunk generation failed, retrying with smaller chunk`, chunkError);
+            chunkSize = chunkSize === 4 ? 2 : chunkSize === 2 ? 1 : 0;
+          }
+        }
+
+        if (!steps.length || !headerResult) {
+          const prompt = createControlledAnalysisPrompt(args.problemText, args.difficulty);
+          const rawResult = await this.generateContent<AnalysisResult>({
+            contents: [
+              { text: prompt },
+              {
+                inlineData: {
+                  mimeType,
+                  data: inlineImage,
+                },
+              },
+            ],
+            schema: ANALYSIS_RESPONSE_SCHEMA,
+            context: `controlled analysis difficulty=${args.difficulty}`,
+            model: modelToUse,
+            timeoutMs: TIMEOUT_FULL_MS,
+          });
+
+          const verification = verifyAnalysis(rawResult);
+          if (!verification.ok) {
+            throw new Error(`analysis_verify_failed:${verification.issues.join(",")}`);
+          }
+
+          rawResult._debug = { ...(rawResult._debug ?? {}), ...debugInfo };
+          return rawResult;
+        }
+
+        const assembled: AnalysisResult = {
+          status: "success",
+          problems: [
+            {
+              id: createProblemId(),
+              problem_text: args.problemText,
+              steps,
+              final_answer: headerResult?.final_answer ?? "",
+              method_hint: headerResult?.method_hint ?? { label: "", pitch: "" },
+            },
+          ],
+          _debug: { ...debugInfo },
+        };
+
+        const verification = verifyAnalysis(assembled);
+        if (!verification.ok) {
+          throw new Error(`analysis_verify_failed:${verification.issues.join(",")}`);
+        }
+
+        return assembled;
+      } catch (error) {
+        lastError = error;
+        console.warn(`[${this.name}] controlled analysis failed attempt=${attempt}`, error);
+      }
     }
 
-    return rawResult;
+    throw lastError ?? new Error("AIの出力が途中で崩れました。もう一度撮って試してね。");
   }
 
   async analyze(imageBase64: string): Promise<AnalysisResult> {
