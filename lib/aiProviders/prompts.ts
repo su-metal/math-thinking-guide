@@ -38,21 +38,20 @@ export const ANALYSIS_PROMPT = `
 具体的な計算方法や手順には触れない。
 
 この内容は、
-・ステップ1以降すべてに共通して有効であること
+・この内容は、ステップ1（最初の整理ステップ）にのみ必須とする
 ・特定の操作や数値に結びつかないこと
 を必須条件とする。
-
 
 【制約】
 ・特定の問題タイプ（比較・計算・図形など）に依存する表現を使わない
 ・問題で聞かれている「最終的な答え」を断定してはいけない
 ・「つまり〇〇人」「これが答えだよ」「人口密度は〇〇だね」などの結論表現は禁止
 ・最終的な答えは、final_answer フィールドでのみ提示する
-・次のステップで何をするかを確定させない
+
 
 【途中計算の出力ルール（重要）】
 - 途中計算（式と計算結果）は steps[].calculation にのみ入れる
-- steps[].solution には式（+ - × ÷）や =（イコール）や計算結果の数値を書かない
+- 数値そのものの言及は、意味づけの文脈であれば許可する
 - steps[].solution は「意味づけ」と「短い問いかけ」だけを書く
 - 最終的な答え（問題が聞いている結論）は final_answer にのみ書く
 - 小学生が使わない関数表記は禁止（LCM, GCD, gcd, lcm, min, max, sqrt, log など）
@@ -70,7 +69,7 @@ export const ANALYSIS_PROMPT = `
 
    【重要】
    - 「まずは◯◯を求めよう。」で終わる文章は禁止する。
-   - 「なぜ今それをするのか」という理由が書かれていない hint は不正な出力とみなす。
+   - 「これをすると、何が分かるようになるのか」という理由が書かれていない hint は不正な出力とみなす。
 
 2. solution（会話の説明だけ）
    - このステップで分かったことを、子供に話しかける会話調で説明する
@@ -334,18 +333,13 @@ export function appendImageToPrompt(prompt: string, imageBase64: string) {
 }
 
 export const PROBLEM_EXTRACTION_PROMPT = `
-画像には算数の問題文が複数写っている可能性があります。以下の厳格なルールで、問題文だけを抽出してください。
+画像には算数の問題文が写っています。以下の厳格なルールで、問題文だけを抽出してください。
 
 - 出力は JSON のみ。余計な説明や余白を含めず、指定した構造だけを返す。
 - 出力形式:
 {
-  "problems": [
-    { "id": "p1", "title": "短い見出し", "problem_text": "画像にある問題文を事実どおりに再構成した文章" }
-  ]
+  "problem_text": "画像にある問題文を事実どおりに再構成した文章"
 }
-- problems は画像内の上→下、左→右の順に並べる。
-- title は任意。付ける場合は12〜18文字程度の短い見出しにする。
-- (1)(2) の小問は、同一テーマ/同一図を共有するなら1つの problem_text にまとめる。完全に独立なら分ける。
 - 図中や文章中の数値・単位・割合・条件をすべて自然な日本語で記述し、指示語や番号（①など）は具体的な語に置き換えてください。
 - 文章はやさしい語尾で、問いかけや命令口調を避けて客観的に説明する形にしてください。
 `;
@@ -354,21 +348,9 @@ export const PROBLEM_EXTRACTION_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    problems: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          id: { type: "string" },
-          title: { type: "string" },
-          problem_text: { type: "string" },
-        },
-        required: ["id", "problem_text"],
-      },
-    },
+    problem_text: { type: "string" },
   },
-  required: ["problems"],
+  required: ["problem_text"],
 } as const;
 
 const STEP_COUNT_RULES: Record<Difficulty, string> = {
