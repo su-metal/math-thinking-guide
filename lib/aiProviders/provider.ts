@@ -11,7 +11,7 @@ export interface AIProvider {
     problemText: string,
     difficulty: Difficulty,
     meta?: LevelMeta,
-    options?: { debug?: boolean }
+    options?: { debug?: boolean; promptAppend?: string }
   ): Promise<AnalysisResult>;
   analyzeWithControls(args: {
     imageBase64: string;

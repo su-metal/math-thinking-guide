@@ -320,12 +320,13 @@ export class OpenAIProvider implements AIProvider {
     imageBase64?: string;
     metaTags?: string[];
     debug?: boolean;
+    promptAppend?: string;
   }): Promise<AnalysisResult> {
     const totalStart = Date.now();
     const debugInfo: Record<string, unknown> = {
       provider: this.name,
     };
-    const prompt = createAnalysisPrompt(args.problemText);
+    const prompt = createAnalysisPrompt(args.problemText, args.promptAppend);
 
     try {
       const raw = await this.request(prompt, ANALYSIS_RESPONSE_SCHEMA, undefined, {
@@ -364,13 +365,14 @@ export class OpenAIProvider implements AIProvider {
     problemText: string,
     difficulty: "easy" | "normal" | "hard",
     meta?: { tags?: string[] },
-    options?: { debug?: boolean }
+    options?: { debug?: boolean; promptAppend?: string }
   ) {
     return this.analyzeFromTextInternal({
       problemText,
       difficulty,
       metaTags: meta?.tags,
       debug: options?.debug,
+      promptAppend: options?.promptAppend,
     });
   }
 

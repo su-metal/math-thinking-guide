@@ -295,6 +295,7 @@ export class GeminiProvider implements AIProvider {
     imageBase64?: string;
     metaTags?: string[];
     debug?: boolean;
+    promptAppend?: string;
   }): Promise<AnalysisResult> {
     this.ensureKey();
     const totalStart = Date.now();
@@ -317,7 +318,7 @@ export class GeminiProvider implements AIProvider {
     const model =
       args.difficulty === "hard" || isGeometry ? GEMINI_COMPLEX_MODEL : GEMINI_SIMPLE_MODEL;
 
-    const prompt = createAnalysisPrompt(args.problemText);
+    const prompt = createAnalysisPrompt(args.problemText, args.promptAppend);
 
     const isJsonError = (error: unknown) => {
       const message = (error as Error)?.message ?? "";
@@ -357,13 +358,14 @@ export class GeminiProvider implements AIProvider {
     problemText: string,
     difficulty: "easy" | "normal" | "hard",
     meta?: { tags?: string[] },
-    options?: { debug?: boolean }
+    options?: { debug?: boolean; promptAppend?: string }
   ) {
     return this.analyzeFromTextInternal({
       problemText,
       difficulty,
       metaTags: meta?.tags,
       debug: options?.debug,
+      promptAppend: options?.promptAppend,
     });
   }
 

@@ -57,6 +57,10 @@ export const ANALYSIS_PROMPT = `
 - 小学生が使わない関数表記は禁止（LCM, GCD, gcd, lcm, min, max, sqrt, log など）
 - 計算式は「+ - × ÷」または「最小公倍数(4と6)」のような日本語だけを使う
 - 記号っぽい省略表現（LCM(4,6) など）は絶対に使わない
+- 整理・性質確認・比較/照合だけのステップでは calculation を出力しない
+- calculation を出す場合、expression は算数の計算式か「最小公倍数(4と6)」のような日本語表現のみ
+- expression にカンマ区切りや「12 = 12」のような等号だけの表現は禁止
+- result は必ず数値（number）のみ。46や1212などの連結疑い値が出たら不正
 
 【ステップ作成の絶対ルール (Strict Rules)】
 各ステップは以下の要素で構成し、それぞれの役割を厳守してください。
@@ -159,8 +163,9 @@ export const ANALYSIS_PROMPT = `
 }
 `;
 
-export function createAnalysisPrompt(problemText: string) {
-  return `${ANALYSIS_PROMPT}\n\n【問題文】\n${problemText}\n`.trim();
+export function createAnalysisPrompt(problemText: string, extraInstruction?: string) {
+  const extra = extraInstruction ? `\n\n【追加ルール】\n${extraInstruction}\n` : "";
+  return `${ANALYSIS_PROMPT}${extra}\n【問題文】\n${problemText}\n`.trim();
 }
 
 export const DRILL_PROMPT = `

@@ -7,6 +7,7 @@ import { NextResponse } from "next/server";
 import { getAIProvider } from "@/lib/aiProviders/provider";
 import { estimateLevel } from "@/lib/levelEstimator";
 import { computeExpression } from "@/lib/math/computeExpression";
+import { validateCalculations } from "@/lib/routing/qualityGate";
 import type { AnalysisResult } from "@/types";
 
 const DEFAULT_ERROR_MESSAGE =
@@ -24,8 +25,6 @@ const applyCalculationOverrides = (result: AnalysisResult) => {
       const computed = computeExpression(calc.expression);
       if (typeof computed === "number") {
         calc.result = computed;
-      } else {
-        delete step.calculation;
       }
     }
   }
@@ -61,12 +60,34 @@ export async function POST(req: Request) {
     }
     const estimatedMeta = estimateLevel(problemText);
 
-    const finalResult: any = await provider.analyzeFromText(
-      problemText,
-      estimatedMeta.difficulty,
-      estimatedMeta,
-      { debug }
-    );
+    const retryPromptAppend =
+      "前の出力で calculation が壊れていた。calculation を出すのは計算が必要なステップだけ。expression は算数の計算式か「最小公倍数(4と6)」のような日本語だけ、カンマや等号は使わない。result は数値のみ。";
+
+    let finalResult: AnalysisResult | undefined;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const candidate = await provider.analyzeFromText(
+        problemText,
+        estimatedMeta.difficulty,
+        estimatedMeta,
+        { debug, promptAppend: attempt === 1 ? retryPromptAppend : undefined }
+      );
+
+      const validation = validateCalculations(candidate?.problems);
+      if (!validation.ok) {
+        const reason = "reason" in validation ? validation.reason : "unknown_reason";
+        console.warn(
+          `[${provider.name}] invalid calculation output, retrying:`,
+          reason
+        );
+        continue;
+      }
+      finalResult = candidate;
+      break;
+    }
+
+    if (!finalResult) {
+      throw new Error("calculation_validation_failed");
+    }
 
     const existingMeta = finalResult.meta ?? {};
     const mergedMeta = { ...estimatedMeta, ...existingMeta };
