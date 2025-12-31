@@ -46,7 +46,8 @@ const TIMEOUT_STEPS_TOTAL_MS = 25_000;
 const TIMEOUT_TOTAL_MS = 35_000;
 const TIMEOUT_FULL_MS = 30_000;
 const MAX_RETRIES = 2;
-const MAX_STEPS_NON_HARD = 5;
+const STEPS_EASY = 3;
+const STEPS_NORMAL = 4;
 
 // ルーティング用の超小さいスキーマ
 const ROUTE_SCHEMA = {
@@ -350,7 +351,14 @@ export class GeminiProvider implements AIProvider {
         let stepsEscalated = false;
         let steps: AnalysisResult["problems"][number]["steps"] = [];
         debugInfo.stepsModelInitial = stepsModelInitial;
-        const totalSteps = effectiveTitles.length > 0 ? effectiveTitles.length : MAX_STEPS_NON_HARD;
+        const totalSteps =
+          effectiveTitles.length > 0
+            ? effectiveTitles.length
+            : args.difficulty === "easy"
+              ? STEPS_EASY
+              : STEPS_NORMAL;
+        const verifyOptions =
+          args.difficulty === "hard" ? undefined : { ignoreDuplicateSimilarity: true };
         let stepsRetryUsed = false;
         const buildStepsOnce = async (): Promise<AnalysisResult["problems"][number]["steps"] | null> => {
           chunkSize = 4;
@@ -395,7 +403,7 @@ export class GeminiProvider implements AIProvider {
                 });
 
                 const chunkSteps = Array.isArray(chunkResult?.steps) ? chunkResult.steps : [];
-                const verification = verifySteps(chunkSteps);
+                const verification = verifySteps(chunkSteps, verifyOptions);
                 if (!verification.ok) {
                   (debugInfo as any).fallbackReason = "verify_failed";
                   (debugInfo as any).verifyIssuesCount = verification.issues.length;
@@ -406,12 +414,12 @@ export class GeminiProvider implements AIProvider {
                 collected.push(...chunkSteps);
               }
               normalizeStepOrders(collected, 1);
-              const fullVerification = verifySteps(collected);
+              const fullVerification = verifySteps(collected, verifyOptions);
               if (!fullVerification.ok) {
                 (debugInfo as any).fallbackReason = "verify_failed";
                 (debugInfo as any).verifyIssuesCount = fullVerification.issues.length;
                 (debugInfo as any).verifyIssuesTop3 = fullVerification.issues.slice(0, 3);
-                if (!stepsRetryUsed && fullVerification.issues.includes("duplicate_step_similarity")) {
+                if (!verifyOptions && !stepsRetryUsed && fullVerification.issues.includes("duplicate_step_similarity")) {
                   stepsRetryUsed = true;
                   return null;
                 }
@@ -444,13 +452,145 @@ export class GeminiProvider implements AIProvider {
           }
           return null;
         };
-        const stepsFirst = await buildStepsOnce();
-        steps = stepsFirst ?? [];
-        if (!steps.length && stepsRetryUsed && checkTotalTimeout() === false) {
-          steps = (await buildStepsOnce()) ?? [];
+        const buildNonHardSteps = async (): Promise<AnalysisResult["problems"][number]["steps"] | null> => {
+          const attempts = 2;
+          for (let i = 0; i < attempts; i += 1) {
+            if (checkTotalTimeout()) {
+              return null;
+            }
+            const elapsedSteps = Date.now() - stepsStart;
+            if (elapsedSteps > TIMEOUT_STEPS_TOTAL_MS) {
+              (debugInfo as any).fallbackReason = "steps_total_timeout";
+              return null;
+            }
+            (debugInfo.stepsChunkHistory as number[]).push(totalSteps);
+            (debugInfo.chunkHistory as number[]).push(totalSteps);
+            const chunkPrompt = createStepsChunkPrompt({
+              problemText: args.problemText,
+              difficulty: args.difficulty,
+              stepTitles: [],
+              startOrder: 1,
+              endOrder: totalSteps,
+            });
+            debugInfo.stepsChunkInputSize = chunkPrompt.length;
+            pushModelTried(stepsModelInitial);
+
+            try {
+              const chunkResult = await this.generateContent<{ steps: AnalysisResult["problems"][number]["steps"] }>({
+                contents: [{ text: chunkPrompt }],
+                schema: ANALYSIS_STEPS_CHUNK_SCHEMA,
+                context: `analysis steps 1-${totalSteps}`,
+                model: stepsModelInitial,
+                timeoutMs: TIMEOUT_STEPS_MS,
+              });
+              const chunkSteps = Array.isArray(chunkResult?.steps) ? chunkResult.steps : [];
+              const verification = verifySteps(chunkSteps, verifyOptions);
+              if (!verification.ok) {
+                (debugInfo as any).fallbackReason = "verify_failed";
+                (debugInfo as any).verifyIssuesCount = verification.issues.length;
+                (debugInfo as any).verifyIssuesTop3 = verification.issues.slice(0, 3);
+                continue;
+              }
+              normalizeStepOrders(chunkSteps, 1);
+              debugInfo.chunkSize = totalSteps;
+              debugInfo.stepsEscalated = false;
+              debugInfo.stepsModelFinal = stepsModelInitial;
+              return chunkSteps;
+            } catch (err) {
+              const msg = String((err as Error)?.message || "");
+              if (msg.includes("Timeout:") && msg.includes("analysis steps")) {
+                (debugInfo as any).fallbackReason = "steps_chunk_timeout";
+              } else if (msg.includes("JSON") || msg.includes("parse")) {
+                (debugInfo as any).fallbackReason = "json_parse_failed";
+              } else if (!(debugInfo as any).fallbackReason) {
+                (debugInfo as any).fallbackReason = "steps_chunk_failed";
+              }
+            }
+          }
+          return null;
+        };
+        if (args.difficulty === "hard") {
+          const stepsFirst = await buildStepsOnce();
+          steps = stepsFirst ?? [];
+          if (!steps.length && stepsRetryUsed && checkTotalTimeout() === false) {
+            steps = (await buildStepsOnce()) ?? [];
+          }
+        } else {
+          steps = (await buildNonHardSteps()) ?? [];
         }
 
         debugInfo.stepsTotalMs = Date.now() - stepsStart;
+
+        if ((debugInfo as any).fallbackReason === "total_timeout") {
+          const shortStepsPrompt = createStepsChunkPrompt({
+            problemText: args.problemText,
+            difficulty: args.difficulty,
+            stepTitles: [],
+            startOrder: 1,
+            endOrder: 3,
+          });
+          const shortStepsTimeout = Math.min(TIMEOUT_STEPS_MS, 8_000);
+          try {
+            pushModelTried(stepsModelInitial);
+            const shortStepsResult = await this.generateContent<{ steps: AnalysisResult["problems"][number]["steps"] }>({
+              contents: [{ text: shortStepsPrompt }],
+              schema: ANALYSIS_STEPS_CHUNK_SCHEMA,
+              context: "analysis steps short",
+              model: stepsModelInitial,
+              timeoutMs: shortStepsTimeout,
+            });
+
+            const shortSteps = Array.isArray(shortStepsResult?.steps) ? shortStepsResult.steps : [];
+            normalizeStepOrders(shortSteps, 1);
+            const shortStepsCheck = verifySteps(shortSteps);
+            if (!shortStepsCheck.ok) {
+              throw new Error(`short_steps_verify_failed:${shortStepsCheck.issues.join(",")}`);
+            }
+
+            let finalHeader = headerResult;
+            if (!finalHeader) {
+              const headerPrompt = createAnalysisHeaderPrompt({
+                problemText: args.problemText,
+                difficulty: args.difficulty,
+                stepTitles: [],
+              });
+              debugInfo.headerInputChars = headerPrompt.length;
+              pushModelTried(GEMINI_SIMPLE_MODEL);
+              finalHeader = await this.generateContent<{
+                method_hint: { label: string; pitch: string };
+                final_answer: string;
+              }>({
+                contents: [{ text: headerPrompt }],
+                schema: ANALYSIS_HEADER_SCHEMA,
+                context: "analysis header short",
+                model: GEMINI_SIMPLE_MODEL,
+                timeoutMs: Math.min(TIMEOUT_HEADER_MS, 8_000),
+              });
+            }
+
+            debugInfo.pipelinePath = "total_timeout_short";
+            debugInfo.modelFinal = stepsModelInitial;
+            (debugInfo as any).fallbackReason = "total_timeout_short";
+            debugInfo.totalMs = Date.now() - totalStart;
+
+            const assembled: AnalysisResult = {
+              status: "success",
+              problems: [
+                {
+                  id: createProblemId(),
+                  problem_text: args.problemText,
+                  steps: shortSteps,
+                  final_answer: finalHeader?.final_answer ?? "",
+                  method_hint: finalHeader?.method_hint ?? { label: "", pitch: "" },
+                },
+              ],
+              _debug: { ...debugInfo },
+            };
+            return assembled;
+          } catch (shortError) {
+            console.warn(`[${this.name}] total timeout short path failed, fallback single-shot`, shortError);
+          }
+        }
 
         if (!steps.length || !headerResult) {
           if (!steps.length && !(debugInfo as any).fallbackReason) {

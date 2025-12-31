@@ -64,7 +64,7 @@ const geometryKeywords = [
   "底辺",
   "高さ",
 ];
-const graphKeywords = ["グラフ", "棒グラフ", "折れ線", "円グラフ", "散布図", "ヒストグラム", "x軸", "y軸"];
+const graphKeywords = ["グラフ", "棒グラフ", "折れ線"];
 const tableKeywords = ["表"]; // 追加（必要なら "一覧表" なども）
 
 
@@ -141,27 +141,27 @@ export function estimateLevel(problemText: string | null | undefined): LevelMeta
   }
 
   const signals: LevelSignals = {
-  has_fraction: containsKeyword(normalized, fractionKeywords) || fractionRegex.test(normalized),
-  has_ratio: containsKeyword(normalized, ratioKeywords) || ratioRegex.test(normalized),
-  has_percentage: containsKeyword(normalized, percentageKeywords) || percentageRegex.test(normalized),
-  has_area: containsKeyword(normalized, areaKeywords) || areaRegex.test(normalized),
-  has_unit_rate: containsKeyword(normalized, unitRateKeywords),
-  has_gcd: (() => {
-    const hasBase = normalized.includes(gcdComboBaseKeyword);
-    const hasPair = gcdComboPairKeywords.some((fragment) => normalized.includes(fragment));
-    const hasCombo = hasBase && hasPair;
-    const hasKeywordMatch = containsKeyword(normalized, gcdKeywordMatchList);
-    return hasCombo || hasKeywordMatch;
-  })(),
-  has_lcm: containsKeyword(normalized, lcmKeywords),
-  has_geometry: containsKeyword(normalized, geometryKeywords),
-  has_graph: containsKeyword(normalized, graphKeywords),
-  has_table: containsKeyword(normalized, tableKeywords), // 追加
-  num_conditions: conditionKeywords.reduce(
-    (total, keyword) => total + countOccurrences(normalized, keyword),
-    0
-  ),
-};
+    has_fraction: containsKeyword(normalized, fractionKeywords) || fractionRegex.test(normalized),
+    has_ratio: containsKeyword(normalized, ratioKeywords) || ratioRegex.test(normalized),
+    has_percentage: containsKeyword(normalized, percentageKeywords) || percentageRegex.test(normalized),
+    has_area: containsKeyword(normalized, areaKeywords) || areaRegex.test(normalized),
+    has_unit_rate: containsKeyword(normalized, unitRateKeywords),
+    has_gcd: (() => {
+      const hasBase = normalized.includes(gcdComboBaseKeyword);
+      const hasPair = gcdComboPairKeywords.some((fragment) => normalized.includes(fragment));
+      const hasCombo = hasBase && hasPair;
+      const hasKeywordMatch = containsKeyword(normalized, gcdKeywordMatchList);
+      return hasCombo || hasKeywordMatch;
+    })(),
+    has_lcm: containsKeyword(normalized, lcmKeywords),
+    has_geometry: containsKeyword(normalized, geometryKeywords),
+    has_graph: containsKeyword(normalized, graphKeywords),
+    has_table: containsKeyword(normalized, tableKeywords),
+    num_conditions: conditionKeywords.reduce(
+      (total, keyword) => total + countOccurrences(normalized, keyword),
+      0
+    ),
+  };
 
   const tags = booleanSignalTagMap.reduce<string[]>((acc, [signalKey, tag]) => {
     if (signals[signalKey]) {

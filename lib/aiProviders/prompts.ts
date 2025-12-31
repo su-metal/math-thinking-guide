@@ -619,6 +619,8 @@ export const PROBLEM_EXTRACTION_PROMPT = `
 }
 - 図中や文章中の数値・単位・割合・条件をすべて自然な日本語で記述し、指示語や番号（①など）は具体的な語に置き換えてください。
 - 文章はやさしい語尾で、問いかけや命令口調を避けて客観的に説明する形にしてください。
+- 図や表、グラフがある場合は、それがあることを必ず problem_text に含めてください。「表」「グラフ」という単語は省略しないでください。
+- 問題文中に「右の表」「次の表」「下のグラフ」などがある場合、その存在を消して文章化しないでください。
 `;
 
 export const PROBLEM_EXTRACTION_SCHEMA = {
@@ -631,9 +633,9 @@ export const PROBLEM_EXTRACTION_SCHEMA = {
 } as const;
 
 const STEP_COUNT_RULES: Record<Difficulty, string> = {
-  easy: "ステップ数は2〜3。1ステップは1つの着眼点/計算対象に集中し、途中で余計なノイズを入れない。",
-  normal: "ステップ数は3〜5で、前のステップを振り返りながら丁寧に進める。",
-  hard: "ステップ数は5〜7。難しさに応じて細かく分割し、1ステップ1つの計算対象を扱う。",
+  easy: "ステップ数は3を基本。簡単な問題を引き延ばしてはいけない。分割は最小限にし、同じ内容の繰り返しを作らない。",
+  normal: "ステップ数は4を基本（必要なら5まで）。簡単な問題を無理に増やしてはいけない。重複や言い換えで水増ししない。",
+  hard: "ステップ数は5-7。必要なら6を超えてよい。難しさに応じて細かく分割し、1ステップ1つの計算対象を扱う。",
 };
 
 const VOCABULARY_RULES: Record<Difficulty, string> = {
@@ -686,49 +688,37 @@ export function createStepsChunkPrompt(args: {
   endOrder: number;
 }) {
   const { problemText, difficulty, stepTitles, startOrder, endOrder } = args;
-  const stepCountRules =
+
+  const nonHardRule =
     difficulty === "hard"
-      ? [
-          "- ステップ数は必要最小限で決める。無理に増やさない。",
-          "- 同じ内容の言い換えや、意味の薄い分割で水増ししない。",
-          "- 理解に必要であれば6ステップを超えてもよい。",
-        ].join("\n")
-      : [
-          "- ステップ数は必要最小限で決める。無理に増やさない。",
-          "- easy/normal は原則として3?5ステップで十分。",
-          "- 同じ内容の言い換えや、意味の薄い分割で水増ししない。",
-        ].join("\n");
-  const comparisonRules =
-    difficulty === "hard"
-      ? [
-          "- 比較や結論は1ステップでまとめてもよい。",
-          "- ただし必要なら比較を複数ステップに分けてもよい。",
-        ].join("\n")
-      : [
-          "- 比較と結論は1ステップで完結させる（比較だけ/結論だけに分割しない）。",
-          "- 例: (1) 1組の計算 (2) 2組の計算 (3) 比較して結論",
-        ].join("\n");
-  const stepTitlesBlock =
-    Array.isArray(stepTitles) && stepTitles.length > 0
-      ? `【この範囲のステップ要点】\n${stepTitles
-          .map((t, idx) => `${startOrder + idx}. ${t}`)
-          .join("\n")}`
-      : "【この範囲のステップ要点】\n(要点なし: order を 1 からの連番で作る)";
+      ? "hard のときは必要なら6ステップを超えてよい。"
+      : "easy/normal は概ね3?4ステップ。必要最小限で作り、無理に増やさない。";
+
+  const hasTitles = Array.isArray(stepTitles) && stepTitles.length > 0;
+
   return `
 指定された範囲のステップだけを作成してください。
-命令口調や講義口調は避け、やさしい会話調(できたかな？、かんがえてみよう)で書いてください。
- hint は着眼点と作戦だけ、solution は意味づけと短い問いかけだけ。
- calculation を出す場合は expression と result を必ず入れます。
- 
- 【ステップ数の決め方】
- ${stepCountRules}
+ステップ数は「必要最小限」。指定レンジの件数ぶんだけ作り、内容の薄い引き延ばしをしない。
+命令口調や講義口調は避け、やさしい会話調(できたかな？、かんがえてみよう)で書く。
+hint は着眼点と作戦だけ、solution は意味づけと短い問いかけだけ。
+calculation を出す場合は expression と result を必ず入れます。
 
-【比較・結論の扱い】
-${comparisonRules}
+【重要: ステップ数の方針】
+- ${nonHardRule}
+- このチャンクで作るステップは ${startOrder} から ${endOrder} の ${endOrder - startOrder + 1} 個。
+- 指定された order 連番の数だけ作り、余計に増やさない。
+- “整理ステップ”は必ず含める（必要最小限 + 整理ステップ1 が基本形）。
+
+【整理ステップ（必須条件）】
+- 最終的に“判定/比較/選択/解釈”が必要な問題では、steps の最後に必ず整理ステップを入れる。
+- 整理ステップでは新しい計算はしない。
+- calculation は出さない。
+- ここまでの結果を同じものさしで並べて言葉で整理する。
+- 最後は短い問いかけで終える（断定しない）。
 
 【calculation ルール】
 - expression は四則演算のみ: + - * / × ÷ ( ) と整数/小数/分数 a/b
-- 禁止: 比較(>, <, =, ≥, ≤), 論理(and/or), 判定や結論文
+- 禁止: 比較(>, <, =, >=, <=), 論理(and/or), 判定や結論文
 - 比較・判定・結論は solution に文章で書く
 - 計算が不要なステップは calculation を出さない
 - expression に単位文字を入れない（単位は unit に）
@@ -738,7 +728,9 @@ ${comparisonRules}
 - ${VOCABULARY_RULES[difficulty]}
 - Separation Rule（1ステップ＝1対象）は厳守。
 
-${stepTitlesBlock}
+${hasTitles ? `【この範囲のステップ要点】\n${stepTitles
+    .map((t, idx) => `${startOrder + idx}. ${t}`)
+    .join("\n")}\n` : ""}
 
 【出力形式(JSONのみ)】
 {

@@ -53,7 +53,10 @@ const hasHighSimilarity = (a: string, b: string, threshold = 0.75) => {
   return jaccard(bigrams(na), bigrams(nb)) >= threshold;
 };
 
-export function verifySteps(steps: MathStep[]): VerificationResult {
+export function verifySteps(
+  steps: MathStep[],
+  options?: { ignoreDuplicateSimilarity?: boolean }
+): VerificationResult {
   const issues: string[] = [];
   if (!Array.isArray(steps) || steps.length === 0) {
     return { ok: false, issues: ["steps_empty"] };
@@ -61,6 +64,7 @@ export function verifySteps(steps: MathStep[]): VerificationResult {
 
   const hints: string[] = [];
   const solutions: string[] = [];
+  let calculationCount = 0;
 
   steps.forEach((step, index) => {
     if (typeof step?.order !== "number") {
@@ -78,6 +82,7 @@ export function verifySteps(steps: MathStep[]): VerificationResult {
     }
 
     if (step?.calculation) {
+      calculationCount += 1;
       if (!isNonEmptyString(step.calculation.expression)) {
         issues.push(`step_${index}_calc_expression_missing`);
       }
@@ -96,8 +101,16 @@ export function verifySteps(steps: MathStep[]): VerificationResult {
       break;
     }
   }
+  if (steps.length >= 2 && calculationCount >= 2 && steps[steps.length - 1]?.calculation) {
+    issues.push("missing_final_summary_step");
+  }
 
-  return { ok: issues.length === 0, issues };
+  const filteredIssues =
+    options?.ignoreDuplicateSimilarity
+      ? issues.filter((issue) => issue !== "duplicate_step_similarity")
+      : issues;
+
+  return { ok: filteredIssues.length === 0, issues: filteredIssues };
 }
 
 export function verifyProblems(problems: MathProblem[]): VerificationResult {
