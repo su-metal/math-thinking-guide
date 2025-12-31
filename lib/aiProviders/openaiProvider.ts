@@ -29,7 +29,7 @@ const OPENAI_MAX_OUTPUT_TOKENS = Number(process.env.OPENAI_MAX_OUTPUT_TOKENS ?? 
 
 const TIMEOUT_PLAN_MS = 10_000;
 const TIMEOUT_HEADER_MS = 25_000;
-const TIMEOUT_STEPS_MS = 15_000;
+const TIMEOUT_STEPS_MS = 25_000;
 const TIMEOUT_FULL_MS = 30_000;
 const MAX_RETRIES = 2;
 
@@ -163,6 +163,9 @@ export class OpenAIProvider implements AIProvider {
     const debugInfo: Record<string, unknown> = {
       headerTimeoutMs: TIMEOUT_HEADER_MS,
       headerAttempts: 0,
+      stepsTimeoutMs: TIMEOUT_STEPS_MS,
+      stepsChunkInputSize: 0,
+      stepsChunkHistory: [] as number[],
     };
     let lastError: unknown;
 
@@ -221,6 +224,7 @@ export class OpenAIProvider implements AIProvider {
         let steps: AnalysisResult["problems"][number]["steps"] = [];
         while (chunkSize >= 1) {
           try {
+            (debugInfo.stepsChunkHistory as number[]).push(chunkSize);
             const collected: AnalysisResult["problems"][number]["steps"] = [];
             for (let i = 0; i < effectiveTitles.length; i += chunkSize) {
               const slice = effectiveTitles.slice(i, i + chunkSize);
@@ -233,6 +237,7 @@ export class OpenAIProvider implements AIProvider {
                 startOrder,
                 endOrder,
               });
+              debugInfo.stepsChunkInputSize = chunkPrompt.length;
 
               const chunkRaw = await this.request(chunkPrompt, ANALYSIS_STEPS_CHUNK_SCHEMA, undefined, {
                 timeoutMs: TIMEOUT_STEPS_MS,
@@ -245,7 +250,9 @@ export class OpenAIProvider implements AIProvider {
               const chunkSteps = Array.isArray(chunkResult?.steps) ? chunkResult.steps : [];
               const verification = verifySteps(chunkSteps);
               if (!verification.ok) {
-                throw new Error(`chunk_verify_failed:${verification.issues.join(",")}`);
+                const err = new Error(`chunk_verify_failed:${verification.issues.join(",")}`);
+                (debugInfo as any).fallbackReason = "verify_failed";
+                throw err;
               }
               collected.push(...chunkSteps);
             }
@@ -254,12 +261,23 @@ export class OpenAIProvider implements AIProvider {
             debugInfo.chunkSize = chunkSize;
             break;
           } catch (chunkError) {
+            const msg = String((chunkError as Error)?.message || "");
+            if (msg.includes("Timeout")) {
+              (debugInfo as any).fallbackReason = "steps_chunk_timeout";
+            } else if (msg.includes("JSON") || msg.includes("parse")) {
+              (debugInfo as any).fallbackReason = "json_parse_failed";
+            } else if (!(debugInfo as any).fallbackReason) {
+              (debugInfo as any).fallbackReason = "steps_chunk_failed";
+            }
             console.warn(`[${this.name}] chunk generation failed, retrying with smaller chunk`, chunkError);
             chunkSize = chunkSize === 4 ? 2 : chunkSize === 2 ? 1 : 0;
           }
         }
 
         if (!steps.length || !headerResult) {
+          if (!steps.length && !(debugInfo as any).fallbackReason) {
+            (debugInfo as any).fallbackReason = "steps_chunk_failed";
+          }
           const prompt = createControlledAnalysisPrompt(args.problemText, args.difficulty);
           const raw = await this.request(prompt, ANALYSIS_RESPONSE_SCHEMA, args.imageBase64, {
             timeoutMs: TIMEOUT_FULL_MS,

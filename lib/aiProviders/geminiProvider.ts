@@ -32,16 +32,16 @@ import {
  *
  * 環境変数があればそちらを優先
  */
-const GEMINI_SIMPLE_MODEL = process.env.GEMINI_SIMPLE_MODEL || "gemini-3-flash-preview";
+const GEMINI_SIMPLE_MODEL = process.env.GEMINI_SIMPLE_MODEL || "gemini-2.5-flash";
 const GEMINI_COMPLEX_MODEL =
   process.env.GEMINI_COMPLEX_MODEL || "gemini-3-flash-preview";
-const GEMINI_ROUTER_MODEL = process.env.GEMINI_ROUTER_MODEL || "gemini-3-flash-preview";
+const GEMINI_ROUTER_MODEL = process.env.GEMINI_ROUTER_MODEL || "gemini-2.5-flash";
 const GEMINI_PRO_MODEL = process.env.GEMINI_PRO_MODEL || GEMINI_COMPLEX_MODEL;
 const GEMINI_MAX_OUTPUT_TOKENS = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS ?? "0") || undefined;
 
 const TIMEOUT_PLAN_MS = 10_000;
 const TIMEOUT_HEADER_MS = 25_000;
-const TIMEOUT_STEPS_MS = 15_000;
+const TIMEOUT_STEPS_MS = 25_000;
 const TIMEOUT_FULL_MS = 30_000;
 const MAX_RETRIES = 2;
 
@@ -242,6 +242,9 @@ export class GeminiProvider implements AIProvider {
     const debugInfo: Record<string, unknown> = {
       headerTimeoutMs: TIMEOUT_HEADER_MS,
       headerAttempts: 0,
+      stepsTimeoutMs: TIMEOUT_STEPS_MS,
+      stepsChunkInputSize: 0,
+      stepsChunkHistory: [] as number[],
     };
 
     let lastError: unknown;
@@ -301,6 +304,7 @@ export class GeminiProvider implements AIProvider {
         let steps: AnalysisResult["problems"][number]["steps"] = [];
         while (chunkSize >= 1) {
           try {
+            (debugInfo.stepsChunkHistory as number[]).push(chunkSize);
             const collected: AnalysisResult["problems"][number]["steps"] = [];
             for (let i = 0; i < effectiveTitles.length; i += chunkSize) {
               const slice = effectiveTitles.slice(i, i + chunkSize);
@@ -313,6 +317,7 @@ export class GeminiProvider implements AIProvider {
                 startOrder,
                 endOrder,
               });
+              debugInfo.stepsChunkInputSize = chunkPrompt.length;
 
               const chunkResult = await this.generateContent<{ steps: AnalysisResult["problems"][number]["steps"] }>({
                 contents: [{ text: chunkPrompt }],
@@ -325,7 +330,9 @@ export class GeminiProvider implements AIProvider {
               const chunkSteps = Array.isArray(chunkResult?.steps) ? chunkResult.steps : [];
               const verification = verifySteps(chunkSteps);
               if (!verification.ok) {
-                throw new Error(`chunk_verify_failed:${verification.issues.join(",")}`);
+                const err = new Error(`chunk_verify_failed:${verification.issues.join(",")}`);
+                (debugInfo as any).fallbackReason = "verify_failed";
+                throw err;
               }
               collected.push(...chunkSteps);
             }
@@ -334,12 +341,23 @@ export class GeminiProvider implements AIProvider {
             debugInfo.chunkSize = chunkSize;
             break;
           } catch (chunkError) {
+            const msg = String((chunkError as Error)?.message || "");
+            if (msg.includes("Timeout")) {
+              (debugInfo as any).fallbackReason = "steps_chunk_timeout";
+            } else if (msg.includes("JSON") || msg.includes("parse")) {
+              (debugInfo as any).fallbackReason = "json_parse_failed";
+            } else if (!(debugInfo as any).fallbackReason) {
+              (debugInfo as any).fallbackReason = "steps_chunk_failed";
+            }
             console.warn(`[${this.name}] chunk generation failed, retrying with smaller chunk`, chunkError);
             chunkSize = chunkSize === 4 ? 2 : chunkSize === 2 ? 1 : 0;
           }
         }
 
         if (!steps.length || !headerResult) {
+          if (!steps.length && !(debugInfo as any).fallbackReason) {
+            (debugInfo as any).fallbackReason = "steps_chunk_failed";
+          }
           const prompt = createControlledAnalysisPrompt(args.problemText, args.difficulty);
           const rawResult = await this.generateContent<AnalysisResult>({
             contents: [

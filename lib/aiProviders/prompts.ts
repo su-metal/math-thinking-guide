@@ -687,15 +687,20 @@ export function createStepsChunkPrompt(args: {
 }) {
   const { problemText, difficulty, stepTitles, startOrder, endOrder } = args;
   return `
-あなたは算数コーチとして、指定された範囲のステップだけを作成します。
-命令口調や講義口調は避け、やさしい会話調で書いてください。
-hint では具体的な式や答えを言わず、着眼点と作戦だけを示します。
-solution には式や計算結果を書かず、意味づけと短い問いかけだけを書きます。
+指定された範囲のステップだけを作成してください。
+命令口調や講義口調は避け、やさしい会話調(できたかな？、かんがえてみよう)で書いてください。
+hint は着眼点と作戦だけ、solution は意味づけと短い問いかけだけ。
 calculation を出す場合は expression と result を必ず入れます。
+
+【calculation ルール】
+- expression は四則演算のみ: + - * / × ÷ ( ) と整数/小数/分数 a/b
+- 禁止: 比較(>, <, =, ≥, ≤), 論理(and/or), 判定や結論文
+- 比較・判定・結論は solution に文章で書く
+- 計算が不要なステップは calculation を出さない
+- expression に単位文字を入れない（単位は unit に）
 
 【制御情報】
 - 難易度: ${difficulty}
-- ${STEP_COUNT_RULES[difficulty]}
 - ${VOCABULARY_RULES[difficulty]}
 - Separation Rule（1ステップ＝1対象）は厳守。
 
@@ -705,12 +710,7 @@ ${stepTitles.map((t, idx) => `${startOrder + idx}. ${t}`).join("\n")}
 【出力形式(JSONのみ)】
 {
   "steps": [
-    {
-      "order": ${startOrder} から ${endOrder} の連番,
-      "hint": "...",
-      "solution": "...",
-      "calculation": { "expression": "...", "result": 0, "unit": "...", "note": "..." }
-    }
+    { "order": ${startOrder} から ${endOrder} の連番, "hint": "...", "solution": "...", "calculation": { "expression": "...", "result": 0 } }
   ]
 }
 
