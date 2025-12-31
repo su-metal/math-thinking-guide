@@ -54,7 +54,8 @@ export async function POST(req: Request) {
 
     const finalResult: any = await provider.analyzeFromText(
       problemText,
-      estimatedMeta.difficulty
+      estimatedMeta.difficulty,
+      estimatedMeta
     );
 
     const existingMeta = finalResult.meta ?? {};

@@ -716,6 +716,8 @@ calculation を出す場合は expression と result を必ず入れます。
 - これまでに出た結果を“ことば”で並べて意味を確認する。
 - 子どもが結論に行ける問いかけで終える（断定しない）。
 - 答えの断定はしない（断定は final_answer のみ）。
+- 最後のステップは、計算結果の意味と単位を言葉で確認して、答えを言う準備をする（結論は言わない）。
+- stepsのhint/solutionでは『答え』『正解』という語を使わない。結論はfinal_answerでのみ述べる。
 ${hasTitles ? "" : "- non-hard の場合、最後のステップは必ず比較/判断/結論準備の役割にする（ただし結論は言わない）。"}
 ${forceJudgementStep ? "- 最後のステップは「くらべて決める」内容にし、結論の断定はしない。" : ""}
 
@@ -798,3 +800,5 @@ export function createFinalAnswerPrompt(problemText: string) {
 ${problemText}
 `.trim();
 }
+
+export { FINAL_ANSWER_SCHEMA, createFinalAnswerPrompt };

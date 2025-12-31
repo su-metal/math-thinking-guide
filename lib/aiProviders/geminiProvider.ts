@@ -14,12 +14,13 @@ import {
   createDrillPrompt,
   createAnalysisPlanPrompt,
   createStepsChunkPrompt,
-  createFinalAnswerPrompt,
-  FINAL_ANSWER_SCHEMA,
 } from "./prompts";
 import {
   createProblemId,
+  ensureFinalCheckStep,
+  needsJudgementStep,
   normalizeStepOrders,
+  sanitizeAnswerLeakInSteps,
   verifyAnalysis,
   verifySteps,
 } from "./analysisUtils";
@@ -34,10 +35,30 @@ import {
  */
 const GEMINI_SIMPLE_MODEL = process.env.GEMINI_SIMPLE_MODEL || "gemini-2.5-flash";
 const GEMINI_COMPLEX_MODEL =
-  process.env.GEMINI_COMPLEX_MODEL || "gemini-3-flash-preview";
+  process.env.GEMINI_COMPLEX_MODEL || "gemini-2.5-flash";
 const GEMINI_ROUTER_MODEL = process.env.GEMINI_ROUTER_MODEL || "gemini-2.5-flash";
 const GEMINI_PRO_MODEL = process.env.GEMINI_PRO_MODEL || GEMINI_COMPLEX_MODEL;
 const GEMINI_MAX_OUTPUT_TOKENS = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS ?? "0") || undefined;
+
+const FINAL_ANSWER_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    final_answer: { type: "string" },
+  },
+  required: ["final_answer"],
+} as const;
+
+const createFinalAnswerPrompt = (problemText: string) => `
+算数の問題の最終回答だけを作成してください。
+「答え：」と「【理由】」の形で、会話調で短くまとめます。
+
+【出力(JSONのみ)】
+{ "final_answer": "答え：...\\n\\n【理由】..." }
+
+【問題文】
+${problemText}
+`.trim();
 
 const TIMEOUT_PLAN_MS = 10_000;
 const TIMEOUT_HEADER_MS = 25_000;
@@ -180,6 +201,17 @@ export class GeminiProvider implements AIProvider {
     };
   }
 
+  private applyForcedJudgementStep(steps: AnalysisResult["problems"][number]["steps"]) {
+    if (!Array.isArray(steps) || steps.length === 0) return;
+    const last = steps[steps.length - 1];
+    last.hint = "計算結果を並べて、どんな違いがあるか見てみよう。";
+    last.solution =
+      "数字が大きい・小さいで、どちらが大きいか判断できそうだね。どうかな？";
+    if (last.calculation) {
+      delete last.calculation;
+    }
+  }
+
   private async generateFinalAnswer(
     problemText: string,
     pushModelTried: (model: string) => void
@@ -306,6 +338,7 @@ export class GeminiProvider implements AIProvider {
     problemText: string;
     difficulty: "easy" | "normal" | "hard";
     imageBase64?: string;
+    metaTags?: string[];
   }): Promise<AnalysisResult> {
     this.ensureKey();
     const totalStart = Date.now();
@@ -332,6 +365,86 @@ export class GeminiProvider implements AIProvider {
         list.push(model);
       }
     };
+
+    const needsJudgement = needsJudgementStep(args.problemText, args.metaTags);
+
+    if (args.difficulty !== "hard") {
+      let lastError: unknown;
+      const models = [GEMINI_SIMPLE_MODEL, GEMINI_COMPLEX_MODEL];
+      for (const model of models) {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const forceJudgementStep = attempt === 1;
+          try {
+            pushModelTried(model);
+            const promptSuffix =
+              forceJudgementStep && needsJudgement
+                ? "\n\n【追加指示】最後のステップは、計算結果をくらべて判断する内容にする。結論の断定はしない。"
+                : "";
+            const prompt =
+              createControlledAnalysisPrompt(args.problemText, args.difficulty) +
+              promptSuffix;
+
+            const rawResult = await this.generateContent<AnalysisResult>({
+              contents: [{ text: prompt }],
+              schema: ANALYSIS_RESPONSE_SCHEMA,
+              context: `controlled analysis single-shot difficulty=${args.difficulty}`,
+              model,
+              timeoutMs: TIMEOUT_FULL_MS,
+            });
+
+            const problem = rawResult?.problems?.[0];
+            if (!problem || !Array.isArray(problem.steps)) {
+              throw new Error("analysis_steps_missing");
+            }
+            if (forceJudgementStep && needsJudgement) {
+              this.applyForcedJudgementStep(problem.steps);
+            }
+
+            sanitizeAnswerLeakInSteps(problem.steps);
+            ensureFinalCheckStep(problem.steps);
+            let stepCheck = verifySteps(problem.steps, {
+              ignoreDuplicateSimilarity: true,
+              needsJudgement,
+            });
+            if (!stepCheck.ok && stepCheck.issues.includes("answer_leak_in_steps")) {
+              sanitizeAnswerLeakInSteps(problem.steps);
+              stepCheck = verifySteps(problem.steps, {
+                ignoreDuplicateSimilarity: true,
+                needsJudgement,
+              });
+            }
+            if (!stepCheck.ok) {
+              const shouldRetry =
+                !forceJudgementStep && stepCheck.issues.includes("missing_judgement_step");
+              if (shouldRetry) {
+                continue;
+              }
+              throw new Error(`single_shot_verify_failed:${stepCheck.issues.join(",")}`);
+            }
+
+            if (!problem.final_answer) {
+              throw new Error("final_answer_missing");
+            }
+            if (!problem.method_hint?.pitch) {
+              problem.method_hint = this.buildMethodHint(args.problemText);
+            }
+
+            debugInfo.pipelinePath = "single_shot";
+            debugInfo.modelFinal = model;
+            debugInfo.totalMs = Date.now() - totalStart;
+            rawResult._debug = { ...(rawResult._debug ?? {}), ...debugInfo };
+            return rawResult;
+          } catch (error) {
+            lastError = error;
+            console.warn(
+              `[${this.name}] single-shot analysis failed model=${model} attempt=${attempt}`,
+              error
+            );
+          }
+        }
+      }
+      throw lastError ?? new Error("AIの出力が途中で崩れました。もう一度撮って試してね。");
+    }
 
     let lastError: unknown;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
@@ -392,12 +505,15 @@ export class GeminiProvider implements AIProvider {
         const totalSteps =
           effectiveTitles.length > 0
             ? effectiveTitles.length
-            : args.difficulty === "easy"
-              ? STEPS_EASY
-              : STEPS_NORMAL;
+            : STEPS_NORMAL;
         const verifyOptions =
           args.difficulty === "hard" ? undefined : { ignoreDuplicateSimilarity: true };
-        const chunkVerifyOptions = { ...(verifyOptions ?? {}), skipFinalStepCheck: true };
+        const fullVerifyOptions = { ...(verifyOptions ?? {}), needsJudgement };
+        const chunkVerifyOptions = {
+          ...(verifyOptions ?? {}),
+          skipFinalStepCheck: true,
+          needsJudgement,
+        };
         let stepsRetryUsed = false;
         let judgementRetryUsed = false;
         let forceJudgementStep = false;
@@ -424,14 +540,17 @@ export class GeminiProvider implements AIProvider {
                 const startOrder = i + 1;
                 const currentCount = Math.min(chunkSize, totalSteps - i);
                 const endOrder = startOrder + currentCount - 1;
-                const chunkPrompt = createStepsChunkPrompt({
+                const chunkPromptBase = createStepsChunkPrompt({
                   problemText: args.problemText,
                   difficulty: args.difficulty,
                   stepTitles: slice,
                   startOrder,
                   endOrder,
-                  forceJudgementStep: forceJudgementStep && endOrder === totalSteps,
                 });
+                const chunkPrompt =
+                  forceJudgementStep && endOrder === totalSteps
+                    ? `${chunkPromptBase}\n\n【追加指示】最後のステップは「くらべて決める」内容にし、結論の断定はしない。`
+                    : chunkPromptBase;
                 debugInfo.stepsChunkInputSize = chunkPrompt.length;
                 const stepsModelToUse = stepsModelOverride ?? stepsModelInitial;
                 pushModelTried(stepsModelToUse);
@@ -456,7 +575,13 @@ export class GeminiProvider implements AIProvider {
                 collected.push(...chunkSteps);
               }
               normalizeStepOrders(collected, 1);
-              const fullVerification = verifySteps(collected, verifyOptions);
+              sanitizeAnswerLeakInSteps(collected);
+              ensureFinalCheckStep(collected);
+              let fullVerification = verifySteps(collected, fullVerifyOptions);
+              if (!fullVerification.ok && fullVerification.issues.includes("answer_leak_in_steps")) {
+                sanitizeAnswerLeakInSteps(collected);
+                fullVerification = verifySteps(collected, fullVerifyOptions);
+              }
               if (!fullVerification.ok) {
                 (debugInfo as any).fallbackReason = "verify_failed";
                 (debugInfo as any).verifyIssuesCount = fullVerification.issues.length;
@@ -518,14 +643,17 @@ export class GeminiProvider implements AIProvider {
               stepTitles: [],
               startOrder: 1,
               endOrder: totalSteps,
-              forceJudgementStep,
             });
-            debugInfo.stepsChunkInputSize = chunkPrompt.length;
+            const chunkPromptResolved =
+              forceJudgementStep
+                ? `${chunkPrompt}\n\n【追加指示】最後のステップは「くらべて決める」内容にし、結論の断定はしない。`
+                : chunkPrompt;
+            debugInfo.stepsChunkInputSize = chunkPromptResolved.length;
             pushModelTried(stepsModelInitial);
 
             try {
               const chunkResult = await this.generateContent<{ steps: AnalysisResult["problems"][number]["steps"] }>({
-                contents: [{ text: chunkPrompt }],
+                contents: [{ text: chunkPromptResolved }],
                 schema: ANALYSIS_STEPS_CHUNK_SCHEMA,
                 context: `analysis steps 1-${totalSteps}`,
                 model: stepsModelInitial,
@@ -595,7 +723,13 @@ export class GeminiProvider implements AIProvider {
 
             const shortSteps = Array.isArray(shortStepsResult?.steps) ? shortStepsResult.steps : [];
             normalizeStepOrders(shortSteps, 1);
-            const shortStepsCheck = verifySteps(shortSteps);
+            sanitizeAnswerLeakInSteps(shortSteps);
+            ensureFinalCheckStep(shortSteps);
+            let shortStepsCheck = verifySteps(shortSteps, { needsJudgement });
+            if (!shortStepsCheck.ok && shortStepsCheck.issues.includes("answer_leak_in_steps")) {
+              sanitizeAnswerLeakInSteps(shortSteps);
+              shortStepsCheck = verifySteps(shortSteps, { needsJudgement });
+            }
             if (!shortStepsCheck.ok) {
               throw new Error(`short_steps_verify_failed:${shortStepsCheck.issues.join(",")}`);
             }
@@ -664,8 +798,28 @@ export class GeminiProvider implements AIProvider {
             timeoutMs: TIMEOUT_FULL_MS,
           });
 
-          const verification = verifyAnalysis(rawResult);
+          if (rawResult?.problems?.[0]?.steps) {
+            sanitizeAnswerLeakInSteps(rawResult.problems[0].steps);
+            ensureFinalCheckStep(rawResult.problems[0].steps);
+          }
+          let verification = verifyAnalysis(rawResult);
           if (!verification.ok) {
+            if (verification.issues.some((issue) => issue.includes("answer_leak_in_steps"))) {
+              if (rawResult?.problems?.[0]?.steps) {
+                sanitizeAnswerLeakInSteps(rawResult.problems[0].steps);
+              }
+              verification = verifyAnalysis(rawResult);
+            }
+            if (verification.ok) {
+              if ((debugInfo as any).verifyIssuesCount === undefined) {
+                (debugInfo as any).verifyIssuesCount = 0;
+                (debugInfo as any).verifyIssuesTop3 = [];
+              }
+              debugInfo.modelFinal = modelToUse;
+              debugInfo.totalMs = Date.now() - totalStart;
+              rawResult._debug = { ...(rawResult._debug ?? {}), ...debugInfo };
+              return rawResult;
+            }
             (debugInfo as any).verifyIssuesCount = verification.issues.length;
             (debugInfo as any).verifyIssuesTop3 = verification.issues.slice(0, 3);
             throw new Error(`analysis_verify_failed:${verification.issues.join(",")}`);
@@ -724,8 +878,12 @@ export class GeminiProvider implements AIProvider {
     throw lastError ?? new Error("AIの出力が途中で崩れました。もう一度撮って試してね。");
   }
 
-  async analyzeFromText(problemText: string, difficulty: "easy" | "normal" | "hard") {
-    return this.analyzeFromTextInternal({ problemText, difficulty });
+  async analyzeFromText(
+    problemText: string,
+    difficulty: "easy" | "normal" | "hard",
+    meta?: { tags?: string[] }
+  ) {
+    return this.analyzeFromTextInternal({ problemText, difficulty, metaTags: meta?.tags });
   }
 
   async analyzeWithControls(args: {

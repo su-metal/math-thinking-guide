@@ -58,7 +58,7 @@ export interface AnalysisResult {
     stepsEscalated?: boolean;
     stepsModelInitial?: string;
     stepsModelFinal?: string;
-    pipelinePath?: "chunked" | "fallback_single_shot" | "total_timeout_short";
+    pipelinePath?: "chunked" | "fallback_single_shot" | "total_timeout_short" | "single_shot";
     routeDecision?: "simple" | "complex";
     fallbackReason?: string;
     stepsTotalMs?: number;

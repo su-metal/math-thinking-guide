@@ -17,7 +17,10 @@ import {
 } from "./prompts";
 import {
   createProblemId,
+  ensureFinalCheckStep,
+  needsJudgementStep,
   normalizeStepOrders,
+  sanitizeAnswerLeakInSteps,
   verifyAnalysis,
   verifySteps,
 } from "./analysisUtils";
@@ -156,10 +159,22 @@ export class OpenAIProvider implements AIProvider {
     return parsed.problem_text.trim();
   }
 
+  private applyForcedJudgementStep(steps: AnalysisResult["problems"][number]["steps"]) {
+    if (!Array.isArray(steps) || steps.length === 0) return;
+    const last = steps[steps.length - 1];
+    last.hint = "計算結果を並べて、どんな違いがあるか見てみよう。";
+    last.solution =
+      "数字が大きい・小さいで、どちらが大きいか判断できそうだね。どうかな？";
+    if (last.calculation) {
+      delete last.calculation;
+    }
+  }
+
   private async analyzeFromTextInternal(args: {
     problemText: string;
     difficulty: "easy" | "normal" | "hard";
     imageBase64?: string;
+    metaTags?: string[];
   }): Promise<AnalysisResult> {
     const totalStart = Date.now();
     const debugInfo: Record<string, unknown> = {
@@ -180,6 +195,79 @@ export class OpenAIProvider implements AIProvider {
       }
     };
     let lastError: unknown;
+
+    const needsJudgement = needsJudgementStep(args.problemText, args.metaTags);
+
+    if (args.difficulty !== "hard") {
+      const models = [OPENAI_MODEL, OPENAI_PRO_MODEL];
+      for (const model of models) {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          const forceJudgementStep = attempt === 1;
+          try {
+            pushModelTried(model);
+            const promptSuffix =
+              forceJudgementStep && needsJudgement
+                ? "\n\n【追加指示】最後のステップは、計算結果をくらべて判断する内容にする。結論の断定はしない。"
+                : "";
+            const prompt =
+              createControlledAnalysisPrompt(args.problemText, args.difficulty) +
+              promptSuffix;
+            const raw = await this.request(prompt, ANALYSIS_RESPONSE_SCHEMA, undefined, {
+              timeoutMs: TIMEOUT_FULL_MS,
+              model,
+            });
+            const parsed = this.parseJson<AnalysisResult>(raw, "openai controlled analysis single");
+            const problem = parsed?.problems?.[0];
+            if (!problem || !Array.isArray(problem.steps)) {
+              throw new Error("analysis_steps_missing");
+            }
+            if (forceJudgementStep && needsJudgement) {
+              this.applyForcedJudgementStep(problem.steps);
+            }
+            sanitizeAnswerLeakInSteps(problem.steps);
+            ensureFinalCheckStep(problem.steps);
+            let stepCheck = verifySteps(problem.steps, {
+              ignoreDuplicateSimilarity: true,
+              needsJudgement,
+            });
+            if (!stepCheck.ok && stepCheck.issues.includes("answer_leak_in_steps")) {
+              sanitizeAnswerLeakInSteps(problem.steps);
+              stepCheck = verifySteps(problem.steps, {
+                ignoreDuplicateSimilarity: true,
+                needsJudgement,
+              });
+            }
+            if (!stepCheck.ok) {
+              const shouldRetry =
+                !forceJudgementStep && stepCheck.issues.includes("missing_judgement_step");
+              if (shouldRetry) {
+                continue;
+              }
+              throw new Error(`single_shot_verify_failed:${stepCheck.issues.join(",")}`);
+            }
+            if (!problem.final_answer) {
+              throw new Error("final_answer_missing");
+            }
+            if (!problem.method_hint?.pitch) {
+              throw new Error("method_hint_missing");
+            }
+
+            debugInfo.pipelinePath = "single_shot";
+            debugInfo.modelFinal = model;
+            debugInfo.totalMs = Date.now() - totalStart;
+            parsed._debug = { ...(parsed._debug ?? {}), ...debugInfo };
+            return parsed;
+          } catch (error) {
+            lastError = error;
+            console.warn(
+              `[${this.name}] single-shot analysis failed model=${model} attempt=${attempt}`,
+              error
+            );
+          }
+        }
+      }
+      throw lastError ?? new Error("AIの出力が途中で崩れました。もう一度撮って試してね。");
+    }
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
       const wantsEscalation = args.difficulty === "hard" || attempt > 0;
@@ -241,6 +329,7 @@ export class OpenAIProvider implements AIProvider {
         let stepsEscalated = false;
         let steps: AnalysisResult["problems"][number]["steps"] = [];
         const totalSteps = effectiveTitles.length;
+        const fullVerifyOptions = { needsJudgement };
         let stepsRetryUsed = false;
         let judgementRetryUsed = false;
         let forceJudgementStep = false;
@@ -266,13 +355,16 @@ export class OpenAIProvider implements AIProvider {
                   stepTitles: slice,
                   startOrder,
                   endOrder,
-                  forceJudgementStep: forceJudgementStep && endOrder === totalSteps,
                 });
+                const chunkPromptResolved =
+                  forceJudgementStep && endOrder === totalSteps
+                    ? `${chunkPrompt}\n\n【追加指示】最後のステップは「くらべて決める」内容にし、結論の断定はしない。`
+                    : chunkPrompt;
                 debugInfo.stepsChunkInputSize = chunkPrompt.length;
                 const stepsModelToUse = stepsModelOverride ?? modelToUse;
                 pushModelTried(stepsModelToUse);
 
-                const chunkRaw = await this.request(chunkPrompt, ANALYSIS_STEPS_CHUNK_SCHEMA, undefined, {
+                const chunkRaw = await this.request(chunkPromptResolved, ANALYSIS_STEPS_CHUNK_SCHEMA, undefined, {
                   timeoutMs: TIMEOUT_STEPS_MS,
                   model: stepsModelToUse,
                 });
@@ -281,7 +373,10 @@ export class OpenAIProvider implements AIProvider {
                   `openai steps ${startOrder}-${endOrder}`
                 );
                 const chunkSteps = Array.isArray(chunkResult?.steps) ? chunkResult.steps : [];
-                const verification = verifySteps(chunkSteps, { skipFinalStepCheck: true });
+                const verification = verifySteps(chunkSteps, {
+                  skipFinalStepCheck: true,
+                  needsJudgement,
+                });
                 if (!verification.ok) {
                   (debugInfo as any).fallbackReason = "verify_failed";
                   (debugInfo as any).verifyIssuesCount = verification.issues.length;
@@ -292,7 +387,13 @@ export class OpenAIProvider implements AIProvider {
                 collected.push(...chunkSteps);
               }
               normalizeStepOrders(collected, 1);
-              const fullVerification = verifySteps(collected);
+              sanitizeAnswerLeakInSteps(collected);
+              ensureFinalCheckStep(collected);
+              let fullVerification = verifySteps(collected, fullVerifyOptions);
+              if (!fullVerification.ok && fullVerification.issues.includes("answer_leak_in_steps")) {
+                sanitizeAnswerLeakInSteps(collected);
+                fullVerification = verifySteps(collected, fullVerifyOptions);
+              }
               if (!fullVerification.ok) {
                 (debugInfo as any).fallbackReason = "verify_failed";
                 (debugInfo as any).verifyIssuesCount = fullVerification.issues.length;
@@ -355,8 +456,28 @@ export class OpenAIProvider implements AIProvider {
           });
           console.log(`[${this.name}] raw model text (controlled analysis)`, raw);
           const parsed = this.parseJson<AnalysisResult>(raw, "openai controlled analysis");
-          const verification = verifyAnalysis(parsed);
+          if (parsed?.problems?.[0]?.steps) {
+            sanitizeAnswerLeakInSteps(parsed.problems[0].steps);
+            ensureFinalCheckStep(parsed.problems[0].steps);
+          }
+          let verification = verifyAnalysis(parsed);
           if (!verification.ok) {
+            if (verification.issues.some((issue) => issue.includes("answer_leak_in_steps"))) {
+              if (parsed?.problems?.[0]?.steps) {
+                sanitizeAnswerLeakInSteps(parsed.problems[0].steps);
+              }
+              verification = verifyAnalysis(parsed);
+            }
+            if (verification.ok) {
+              if ((debugInfo as any).verifyIssuesCount === undefined) {
+                (debugInfo as any).verifyIssuesCount = 0;
+                (debugInfo as any).verifyIssuesTop3 = [];
+              }
+              debugInfo.modelFinal = modelToUse;
+              debugInfo.totalMs = Date.now() - totalStart;
+              parsed._debug = { ...(parsed._debug ?? {}), ...debugInfo };
+              return parsed;
+            }
             (debugInfo as any).verifyIssuesCount = verification.issues.length;
             (debugInfo as any).verifyIssuesTop3 = verification.issues.slice(0, 3);
             throw new Error(`analysis_verify_failed:${verification.issues.join(",")}`);
@@ -412,8 +533,12 @@ export class OpenAIProvider implements AIProvider {
     throw lastError ?? new Error("AIの出力が途中で崩れました。もう一度撮って試してね。");
   }
 
-  async analyzeFromText(problemText: string, difficulty: "easy" | "normal" | "hard") {
-    return this.analyzeFromTextInternal({ problemText, difficulty });
+  async analyzeFromText(
+    problemText: string,
+    difficulty: "easy" | "normal" | "hard",
+    meta?: { tags?: string[] }
+  ) {
+    return this.analyzeFromTextInternal({ problemText, difficulty, metaTags: meta?.tags });
   }
 
   async analyzeWithControls(args: {
