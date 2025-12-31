@@ -156,10 +156,10 @@ export class OpenAIProvider implements AIProvider {
     return parsed.problem_text.trim();
   }
 
-  async analyzeWithControls(args: {
-    imageBase64: string;
+  private async analyzeFromTextInternal(args: {
     problemText: string;
     difficulty: "easy" | "normal" | "hard";
+    imageBase64?: string;
   }): Promise<AnalysisResult> {
     const totalStart = Date.now();
     const debugInfo: Record<string, unknown> = {
@@ -242,6 +242,8 @@ export class OpenAIProvider implements AIProvider {
         let steps: AnalysisResult["problems"][number]["steps"] = [];
         const totalSteps = effectiveTitles.length;
         let stepsRetryUsed = false;
+        let judgementRetryUsed = false;
+        let forceJudgementStep = false;
         const buildStepsOnce = async (): Promise<AnalysisResult["problems"][number]["steps"] | null> => {
           chunkSize = 4;
           while (chunkSize >= 1) {
@@ -264,6 +266,7 @@ export class OpenAIProvider implements AIProvider {
                   stepTitles: slice,
                   startOrder,
                   endOrder,
+                  forceJudgementStep: forceJudgementStep && endOrder === totalSteps,
                 });
                 debugInfo.stepsChunkInputSize = chunkPrompt.length;
                 const stepsModelToUse = stepsModelOverride ?? modelToUse;
@@ -278,7 +281,7 @@ export class OpenAIProvider implements AIProvider {
                   `openai steps ${startOrder}-${endOrder}`
                 );
                 const chunkSteps = Array.isArray(chunkResult?.steps) ? chunkResult.steps : [];
-                const verification = verifySteps(chunkSteps);
+                const verification = verifySteps(chunkSteps, { skipFinalStepCheck: true });
                 if (!verification.ok) {
                   (debugInfo as any).fallbackReason = "verify_failed";
                   (debugInfo as any).verifyIssuesCount = verification.issues.length;
@@ -294,6 +297,11 @@ export class OpenAIProvider implements AIProvider {
                 (debugInfo as any).fallbackReason = "verify_failed";
                 (debugInfo as any).verifyIssuesCount = fullVerification.issues.length;
                 (debugInfo as any).verifyIssuesTop3 = fullVerification.issues.slice(0, 3);
+                if (!judgementRetryUsed && fullVerification.issues.includes("missing_judgement_step")) {
+                  judgementRetryUsed = true;
+                  forceJudgementStep = true;
+                  return null;
+                }
                 if (!stepsRetryUsed && fullVerification.issues.includes("duplicate_step_similarity")) {
                   stepsRetryUsed = true;
                   return null;
@@ -329,7 +337,7 @@ export class OpenAIProvider implements AIProvider {
         };
         const stepsFirst = await buildStepsOnce();
         steps = stepsFirst ?? [];
-        if (!steps.length && stepsRetryUsed) {
+        if (!steps.length && (stepsRetryUsed || judgementRetryUsed)) {
           steps = (await buildStepsOnce()) ?? [];
         }
 
@@ -402,6 +410,18 @@ export class OpenAIProvider implements AIProvider {
     }
 
     throw lastError ?? new Error("AIの出力が途中で崩れました。もう一度撮って試してね。");
+  }
+
+  async analyzeFromText(problemText: string, difficulty: "easy" | "normal" | "hard") {
+    return this.analyzeFromTextInternal({ problemText, difficulty });
+  }
+
+  async analyzeWithControls(args: {
+    imageBase64: string;
+    problemText: string;
+    difficulty: "easy" | "normal" | "hard";
+  }): Promise<AnalysisResult> {
+    return this.analyzeFromTextInternal(args);
   }
 
   async generateDrill(originalProblem: string): Promise<DrillResult> {

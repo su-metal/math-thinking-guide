@@ -302,15 +302,19 @@ export class GeminiProvider implements AIProvider {
     return extracted.problem_text.trim();
   }
 
-  async analyzeWithControls(args: {
-    imageBase64: string;
+  private async analyzeFromTextInternal(args: {
     problemText: string;
     difficulty: "easy" | "normal" | "hard";
+    imageBase64?: string;
   }): Promise<AnalysisResult> {
     this.ensureKey();
     const totalStart = Date.now();
-    const inlineImage = args.imageBase64.split(",")[1] || args.imageBase64;
-    const mimeType = this.detectMimeType(args.imageBase64);
+    const hasImage =
+      typeof args.imageBase64 === "string" && args.imageBase64.trim() !== "";
+    const inlineImage = hasImage
+      ? args.imageBase64.split(",")[1] || args.imageBase64
+      : "";
+    const mimeType = hasImage ? this.detectMimeType(args.imageBase64) : "";
     const debugInfo: Record<string, unknown> = {
       provider: this.name,
       headerTimeoutMs: TIMEOUT_HEADER_MS,
@@ -393,9 +397,12 @@ export class GeminiProvider implements AIProvider {
               : STEPS_NORMAL;
         const verifyOptions =
           args.difficulty === "hard" ? undefined : { ignoreDuplicateSimilarity: true };
+        const chunkVerifyOptions = { ...(verifyOptions ?? {}), skipFinalStepCheck: true };
         let stepsRetryUsed = false;
+        let judgementRetryUsed = false;
+        let forceJudgementStep = false;
         const buildStepsOnce = async (): Promise<AnalysisResult["problems"][number]["steps"] | null> => {
-          chunkSize = 4;
+          chunkSize = args.difficulty === "hard" ? 4 : 2;
           while (chunkSize >= 1) {
             try {
               if (checkTotalTimeout()) {
@@ -423,6 +430,7 @@ export class GeminiProvider implements AIProvider {
                   stepTitles: slice,
                   startOrder,
                   endOrder,
+                  forceJudgementStep: forceJudgementStep && endOrder === totalSteps,
                 });
                 debugInfo.stepsChunkInputSize = chunkPrompt.length;
                 const stepsModelToUse = stepsModelOverride ?? stepsModelInitial;
@@ -437,7 +445,7 @@ export class GeminiProvider implements AIProvider {
                 });
 
                 const chunkSteps = Array.isArray(chunkResult?.steps) ? chunkResult.steps : [];
-                const verification = verifySteps(chunkSteps, verifyOptions);
+                const verification = verifySteps(chunkSteps, chunkVerifyOptions);
                 if (!verification.ok) {
                   (debugInfo as any).fallbackReason = "verify_failed";
                   (debugInfo as any).verifyIssuesCount = verification.issues.length;
@@ -453,6 +461,11 @@ export class GeminiProvider implements AIProvider {
                 (debugInfo as any).fallbackReason = "verify_failed";
                 (debugInfo as any).verifyIssuesCount = fullVerification.issues.length;
                 (debugInfo as any).verifyIssuesTop3 = fullVerification.issues.slice(0, 3);
+                if (!judgementRetryUsed && fullVerification.issues.includes("missing_judgement_step")) {
+                  judgementRetryUsed = true;
+                  forceJudgementStep = true;
+                  return null;
+                }
                 if (!verifyOptions && !stepsRetryUsed && fullVerification.issues.includes("duplicate_step_similarity")) {
                   stepsRetryUsed = true;
                   return null;
@@ -505,6 +518,7 @@ export class GeminiProvider implements AIProvider {
               stepTitles: [],
               startOrder: 1,
               endOrder: totalSteps,
+              forceJudgementStep,
             });
             debugInfo.stepsChunkInputSize = chunkPrompt.length;
             pushModelTried(stepsModelInitial);
@@ -518,11 +532,16 @@ export class GeminiProvider implements AIProvider {
                 timeoutMs: TIMEOUT_STEPS_MS,
               });
               const chunkSteps = Array.isArray(chunkResult?.steps) ? chunkResult.steps : [];
-              const verification = verifySteps(chunkSteps, verifyOptions);
+              const verification = verifySteps(chunkSteps, chunkVerifyOptions);
               if (!verification.ok) {
                 (debugInfo as any).fallbackReason = "verify_failed";
                 (debugInfo as any).verifyIssuesCount = verification.issues.length;
                 (debugInfo as any).verifyIssuesTop3 = verification.issues.slice(0, 3);
+                if (!judgementRetryUsed && verification.issues.includes("missing_judgement_step")) {
+                  judgementRetryUsed = true;
+                  forceJudgementStep = true;
+                  continue;
+                }
                 continue;
               }
               normalizeStepOrders(chunkSteps, 1);
@@ -546,7 +565,7 @@ export class GeminiProvider implements AIProvider {
         if (args.difficulty === "hard") {
           const stepsFirst = await buildStepsOnce();
           steps = stepsFirst ?? [];
-          if (!steps.length && stepsRetryUsed && checkTotalTimeout() === false) {
+          if (!steps.length && (stepsRetryUsed || judgementRetryUsed) && checkTotalTimeout() === false) {
             steps = (await buildStepsOnce()) ?? [];
           }
         } else {
@@ -626,16 +645,19 @@ export class GeminiProvider implements AIProvider {
           }
           debugInfo.pipelinePath = "fallback_single_shot";
           const prompt = createControlledAnalysisPrompt(args.problemText, args.difficulty);
-          const rawResult = await this.generateContent<AnalysisResult>({
-            contents: [
-              { text: prompt },
-              {
-                inlineData: {
-                  mimeType,
-                  data: inlineImage,
-                },
+          const contents: Parameters<GoogleGenAI["models"]["generateContent"]>[0]["contents"] = [
+            { text: prompt },
+          ];
+          if (hasImage) {
+            contents.push({
+              inlineData: {
+                mimeType,
+                data: inlineImage,
               },
-            ],
+            });
+          }
+          const rawResult = await this.generateContent<AnalysisResult>({
+            contents,
             schema: ANALYSIS_RESPONSE_SCHEMA,
             context: `controlled analysis difficulty=${args.difficulty}`,
             model: modelToUse,
@@ -700,6 +722,18 @@ export class GeminiProvider implements AIProvider {
     }
 
     throw lastError ?? new Error("AIの出力が途中で崩れました。もう一度撮って試してね。");
+  }
+
+  async analyzeFromText(problemText: string, difficulty: "easy" | "normal" | "hard") {
+    return this.analyzeFromTextInternal({ problemText, difficulty });
+  }
+
+  async analyzeWithControls(args: {
+    imageBase64: string;
+    problemText: string;
+    difficulty: "easy" | "normal" | "hard";
+  }): Promise<AnalysisResult> {
+    return this.analyzeFromTextInternal(args);
   }
 
   async analyze(imageBase64: string): Promise<AnalysisResult> {

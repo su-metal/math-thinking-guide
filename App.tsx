@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { AppScreen, AnalysisResult, HistoryItem, DrillProblem, DrillResult, MathProblem } from './types';
-import { analyzeMathProblem, generateDrillProblems } from './services/geminiService';
+import { AppScreen, AnalysisResult, HistoryItem, DrillProblem, DrillResult, MathProblem, ReadResult } from './types';
+import { readMathProblem, solveMathProblem, generateDrillProblems } from './services/geminiService';
 import {
   Camera,
   Image as ImageIcon,
@@ -45,6 +45,12 @@ const isQuotaExceededError = (error: unknown): boolean => {
     return typeof errName === 'string' && /quota/i.test(errName);
   }
   return false;
+};
+
+const isAbortError = (error: unknown): boolean => {
+  if (!error || typeof error !== 'object') return false;
+  const name = (error as { name?: string }).name;
+  return name === 'AbortError';
 };
 
 const persistHistory = (items: HistoryItem[]): HistoryItem[] => {
@@ -446,6 +452,9 @@ const App: React.FC = () => {
   const [currentScreen, setCurrentScreen] = useState<AppScreen>(AppScreen.SPLASH);
   const [prevScreen, setPrevScreen] = useState<AppScreen | null>(null);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [analysisPhase, setAnalysisPhase] = useState<"idle" | "reading" | "read_done" | "solving" | "done" | "error">("idle");
+  const [readProblemText, setReadProblemText] = useState<string | null>(null);
+  const [readMeta, setReadMeta] = useState<ReadResult["meta"] | null>(null);
   const [drillResult, setDrillResult] = useState<DrillResult | null>(null);
   const [tempImage, setTempImage] = useState<string | null>(null);
   const [croppedImage, setCroppedImage] = useState<string | null>(null);
@@ -461,6 +470,9 @@ const App: React.FC = () => {
   const [isLoadingDrills, setIsLoadingDrills] = useState(false);
   const [showFullImage, setShowFullImage] = useState(false);
   const [showPrevCalc, setShowPrevCalc] = useState(false);
+  const requestIdRef = useRef(0);
+  const readAbortRef = useRef<AbortController | null>(null);
+  const solveAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     setShowPrevCalc(false);
@@ -550,12 +562,37 @@ const App: React.FC = () => {
     setCroppedImage(img);
     setCurrentScreen(AppScreen.LOADING);
     setShowFinalAnswer(false);
+    setAnalysisResult(null);
+    setReadProblemText(null);
+    setReadMeta(null);
+    setAnalysisPhase("reading");
+
+    requestIdRef.current += 1;
+    const requestId = requestIdRef.current;
+    readAbortRef.current?.abort();
+    solveAbortRef.current?.abort();
+
     try {
-      const result = await analyzeMathProblem(img);
+      const readController = new AbortController();
+      readAbortRef.current = readController;
+      const readResult = await readMathProblem(img, readController.signal);
+      if (requestIdRef.current !== requestId) return;
+
+      setReadProblemText(readResult.problem_text);
+      setReadMeta(readResult.meta);
+      setAnalysisPhase("read_done");
+
+      const solveController = new AbortController();
+      solveAbortRef.current = solveController;
+      setAnalysisPhase("solving");
+      const result = await solveMathProblem(readResult.problem_text, readResult.meta, solveController.signal);
+      if (requestIdRef.current !== requestId) return;
+
       console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
       setAnalysisResult(result);
       setCurrentProblemIndex(0);
       setCurrentStepIndex(0);
+      setAnalysisPhase("done");
 
       if (result.problems && result.problems.length > 1) {
         setCurrentScreen(AppScreen.PROBLEM_SELECT);
@@ -575,6 +612,10 @@ const App: React.FC = () => {
       saveHistory(historyItem);
       decreaseTries();
     } catch (err: any) {
+      if (isAbortError(err)) {
+        return;
+      }
+      setAnalysisPhase("error");
       alert(err.message || "エラーがおきました。もういちど試してね。");
       setCurrentScreen(AppScreen.HOME);
     }
@@ -773,6 +814,46 @@ const App: React.FC = () => {
       </div>
       <h2 className="text-2xl font-black text-gray-800 mb-2">スパッキー先生が考え中...</h2>
       <p className="text-gray-500 font-bold">問題をじっくり見ているよ。ちょっとまってね！</p>
+
+      <div className="mt-8 w-full max-w-md space-y-4">
+        <div className="bg-white rounded-2xl border border-blue-100 shadow-sm px-5 py-4 text-left">
+          <div className="flex items-center gap-2 mb-1">
+            {analysisPhase === "reading" ? (
+              <RefreshCw className="text-blue-500 animate-spin" size={16} />
+            ) : (
+              <Check className="text-green-500" size={16} />
+            )}
+            <p className="text-sm font-black text-gray-700">読み取り</p>
+          </div>
+          <p className="text-xs font-bold text-gray-400">
+            {analysisPhase === "reading" ? "いま文字をよみとっているよ" : "読み取りができたよ"}
+          </p>
+        </div>
+
+        {readProblemText && (
+          <div className="bg-white rounded-3xl border-2 border-blue-100 shadow-sm px-6 py-5 text-left">
+            <p className="text-[10px] text-blue-400 font-black uppercase tracking-widest mb-2">問題文</p>
+            <p className="text-sm font-black text-gray-700 leading-relaxed">
+              {readProblemText}
+            </p>
+          </div>
+        )}
+
+        {analysisPhase === "solving" && (
+          <div className="bg-white rounded-2xl border border-blue-100 shadow-sm px-5 py-4 text-left space-y-3">
+            <div className="flex items-center gap-2">
+              <RefreshCw className="text-indigo-500 animate-spin" size={16} />
+              <p className="text-sm font-black text-gray-700">解き方を作っているよ</p>
+            </div>
+            {[0, 1, 2].map((idx) => (
+              <div key={idx} className="bg-blue-50/70 rounded-2xl px-4 py-3">
+                <div className="h-3 w-24 bg-blue-200/70 rounded-full mb-2 animate-pulse"></div>
+                <div className="h-3 w-full bg-blue-100 rounded-full animate-pulse"></div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 

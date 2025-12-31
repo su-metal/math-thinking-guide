@@ -686,8 +686,9 @@ export function createStepsChunkPrompt(args: {
   stepTitles: string[];
   startOrder: number;
   endOrder: number;
+  forceJudgementStep?: boolean;
 }) {
-  const { problemText, difficulty, stepTitles, startOrder, endOrder } = args;
+  const { problemText, difficulty, stepTitles, startOrder, endOrder, forceJudgementStep } = args;
 
   const nonHardRule =
     difficulty === "hard"
@@ -709,12 +710,14 @@ calculation を出す場合は expression と result を必ず入れます。
 - 指定された order 連番の数だけ作り、余計に増やさない。
 - “整理ステップ”は必ず含める（必要最小限 + 整理ステップ1 が基本形）。
 
-【整理ステップ（必須条件）】
-- 最終的に“判定/比較/選択/解釈”が必要な問題では、steps の最後に必ず整理ステップを入れる。
-- 整理ステップでは新しい計算はしない。
-- calculation は出さない。
-- ここまでの結果を同じものさしで並べて言葉で整理する。
-- 最後は短い問いかけで終える（断定しない）。
+【最終確認ステップ ルール（必須）】
+- ステップの最後に必ず「まとめ/確認」のステップを1つ入れる。
+- そのステップでは新しい計算はしない（calculation は出さない）。
+- これまでに出た結果を“ことば”で並べて意味を確認する。
+- 子どもが結論に行ける問いかけで終える（断定しない）。
+- 答えの断定はしない（断定は final_answer のみ）。
+${hasTitles ? "" : "- non-hard の場合、最後のステップは必ず比較/判断/結論準備の役割にする（ただし結論は言わない）。"}
+${forceJudgementStep ? "- 最後のステップは「くらべて決める」内容にし、結論の断定はしない。" : ""}
 
 【calculation ルール】
 - expression は四則演算のみ: + - * / × ÷ ( ) と整数/小数/分数 a/b

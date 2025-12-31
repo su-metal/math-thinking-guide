@@ -7,6 +7,7 @@ export interface AIProvider {
   name: string;
   analyze(imageBase64: string): Promise<AnalysisResult>;
   extractProblemText(imageBase64: string): Promise<string>;
+  analyzeFromText(problemText: string, difficulty: Difficulty): Promise<AnalysisResult>;
   analyzeWithControls(args: {
     imageBase64: string;
     problemText: string;

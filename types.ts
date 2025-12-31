@@ -68,6 +68,21 @@ export interface AnalysisResult {
   };
 }
 
+export interface ReadResult {
+  status: "success";
+  problem_text: string;
+  meta: {
+    difficulty: "easy" | "normal" | "hard";
+    tags: string[];
+    confidence: number;
+    signals: Record<string, unknown>;
+  };
+  _debug?: {
+    provider?: string;
+    phase?: string;
+  };
+}
+
 export interface DrillProblem {
   question: string;
   answer: string;

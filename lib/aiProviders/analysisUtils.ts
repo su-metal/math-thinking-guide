@@ -46,7 +46,7 @@ const jaccard = (a: Set<string>, b: Set<string>) => {
   return union === 0 ? 0 : intersection / union;
 };
 
-const hasHighSimilarity = (a: string, b: string, threshold = 0.75) => {
+const hasHighSimilarity = (a: string, b: string, threshold = 0.82) => {
   const na = normalizeForSimilarity(a);
   const nb = normalizeForSimilarity(b);
   if (na.length < 4 || nb.length < 4) return false;
@@ -55,7 +55,7 @@ const hasHighSimilarity = (a: string, b: string, threshold = 0.75) => {
 
 export function verifySteps(
   steps: MathStep[],
-  options?: { ignoreDuplicateSimilarity?: boolean }
+  options?: { ignoreDuplicateSimilarity?: boolean; skipFinalStepCheck?: boolean }
 ): VerificationResult {
   const issues: string[] = [];
   if (!Array.isArray(steps) || steps.length === 0) {
@@ -96,13 +96,82 @@ export function verifySteps(
     issues.push("repetition_solution");
   }
   for (let i = 1; i < hints.length; i += 1) {
+    const isFinalPair = i === hints.length - 1;
+    if (isFinalPair) {
+      continue;
+    }
     if (hasHighSimilarity(hints[i - 1], hints[i]) || hasHighSimilarity(solutions[i - 1], solutions[i])) {
       issues.push("duplicate_step_similarity");
       break;
     }
   }
-  if (steps.length >= 2 && calculationCount >= 2 && steps[steps.length - 1]?.calculation) {
-    issues.push("missing_final_summary_step");
+  if (steps.length >= 2) {
+    const expressionSet = new Set<string>();
+    let repeatedExpression = false;
+    for (const step of steps) {
+      const expr = step?.calculation?.expression;
+      if (typeof expr !== "string" || expr.trim() === "") continue;
+      const normalizedExpr = expr.replace(/\s+/g, "");
+      if (expressionSet.has(normalizedExpr)) {
+        repeatedExpression = true;
+        break;
+      }
+      expressionSet.add(normalizedExpr);
+    }
+    if (repeatedExpression) {
+      issues.push("duplicate_step_expression");
+    }
+  }
+  const answerLeakKeywords = ["答え", "正解"];
+  const hasAnswerLeak = steps.some(
+    (step) =>
+      answerLeakKeywords.some((kw) => (step?.hint ?? "").includes(kw)) ||
+      answerLeakKeywords.some((kw) => (step?.solution ?? "").includes(kw))
+  );
+  if (hasAnswerLeak) {
+    issues.push("answer_leak_in_steps");
+  }
+
+  if (!options?.skipFinalStepCheck) {
+    if (steps.length >= 2 && calculationCount >= 2 && steps[steps.length - 1]?.calculation) {
+      issues.push("missing_final_summary_step");
+    }
+
+    const finalStep = steps[steps.length - 1];
+    if (finalStep?.calculation) {
+      issues.push("missing_final_check_step");
+    }
+    const finalText = `${finalStep?.hint ?? ""} ${finalStep?.solution ?? ""}`.trim();
+    const checkKeywords = ["まとめ", "確認", "見くらべ", "比べ", "ならべ", "意味", "ふり返", "整理"];
+    const hasCheckKeyword = checkKeywords.some((kw) => finalText.includes(kw));
+    if (!hasCheckKeyword) {
+      issues.push("missing_final_check_step");
+    }
+    const answerKeywords = ["答え", "だから", "よって"];
+    const hasPrematureAnswer = answerKeywords.some((kw) => (finalStep?.solution ?? "").includes(kw));
+    if (hasPrematureAnswer) {
+      issues.push("premature_final_answer");
+    }
+
+    const judgementKeywords = [
+      "くらべ",
+      "比べ",
+      "どちら",
+      "大きい",
+      "小さい",
+      "多い",
+      "少ない",
+      "いちばん",
+      "同じ",
+      "決める",
+      "判断",
+      "見くらべ",
+    ];
+    const needsJudgement = calculationCount >= 2;
+    const hasJudgementKeyword = judgementKeywords.some((kw) => finalText.includes(kw));
+    if (needsJudgement && !hasJudgementKeyword) {
+      issues.push("missing_judgement_step");
+    }
   }
 
   const filteredIssues =

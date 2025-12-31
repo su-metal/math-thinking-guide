@@ -1,4 +1,4 @@
-import { AnalysisResult, DrillResult } from "../types";
+import { AnalysisResult, DrillResult, ReadResult } from "../types";
 
 async function handleResponse<T>(response: Response, fallbackMessage: string): Promise<T> {
   const data = await response.json().catch(() => ({}));
@@ -10,13 +10,33 @@ async function handleResponse<T>(response: Response, fallbackMessage: string): P
   return data as T;
 }
 
-export async function analyzeMathProblem(
-  imageBase64: string
-): Promise<AnalysisResult> {
-  const response = await fetch("/api/analyze", {
+export async function readMathProblem(
+  imageBase64: string,
+  signal?: AbortSignal
+): Promise<ReadResult> {
+  const response = await fetch("/api/read", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ imageBase64, debug: true })
+    body: JSON.stringify({ imageBase64 }),
+    signal
+  });
+
+  return handleResponse<ReadResult>(
+    response,
+    "AIが問題を読み取れませんでした。明るい場所でもういちど撮ってみてね。"
+  );
+}
+
+export async function solveMathProblem(
+  problem_text: string,
+  meta?: ReadResult["meta"],
+  signal?: AbortSignal
+): Promise<AnalysisResult> {
+  const response = await fetch("/api/solve", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ problem_text, meta, debug: true }),
+    signal
   });
 
   return handleResponse<AnalysisResult>(
