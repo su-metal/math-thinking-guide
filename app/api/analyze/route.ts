@@ -22,7 +22,10 @@ const applyCalculationOverrides = (result: AnalysisResult) => {
     for (const step of problem.steps) {
       const calc = step?.calculation;
       if (!calc || typeof calc.expression !== "string") continue;
-      const computed = computeExpression(calc.expression);
+      const expr = calc.expression;
+      if (expr.includes("最小公倍数") || expr.includes("最大公約数")) continue;
+      if (!/^[0-9+\-×÷().\s]+$/.test(expr)) continue;
+      const computed = computeExpression(expr);
       if (typeof computed === "number") {
         calc.result = computed;
       }
@@ -61,7 +64,7 @@ export async function POST(req: Request) {
     const estimatedMeta = estimateLevel(problemText);
 
     const retryPromptAppend =
-      "前の出力で calculation が壊れていた。calculation を出すのは計算が必要なステップだけ。expression は算数の計算式か「最小公倍数(4と6)」のような日本語だけ、カンマや等号は使わない。result は数値のみ。";
+      "前の出力で calculation が壊れていた。calculation を出すのは計算が必要なステップだけ。expression は算数の計算式か「最小公倍数(4と6)」「最大公約数(24と40)」のような日本語だけ、カンマや等号は使わない。最小公倍数/最大公約数の result は定義どおり必ず割り切れる値にする。result は数値のみ。";
 
     let finalResult: AnalysisResult | undefined;
     for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -73,6 +76,25 @@ export async function POST(req: Request) {
       );
 
       const validation = validateCalculations(candidate?.problems);
+      if (debug) {
+        const calcList =
+          candidate?.problems?.flatMap((problem) =>
+            Array.isArray(problem?.steps)
+              ? problem.steps
+                  .map((step) => step?.calculation)
+                  .filter((calc) => calc && typeof calc.expression === "string")
+                  .map((calc) => ({
+                    expression: calc!.expression,
+                    result: calc!.result,
+                  }))
+              : []
+          ) ?? [];
+        const reason = "reason" in validation ? validation.reason : undefined;
+        console.log(
+          `[${provider.name}] gate check attempt=${attempt} ok=${validation.ok} reason=${reason ?? "n/a"}`,
+          calcList
+        );
+      }
       if (!validation.ok) {
         const reason = "reason" in validation ? validation.reason : "unknown_reason";
         console.warn(
@@ -106,7 +128,13 @@ export async function POST(req: Request) {
         finalResult && typeof finalResult._debug === "object" && finalResult._debug !== null
           ? finalResult._debug
           : {};
-      finalResult._debug = { ...existingDebug, provider: provider.name };
+      const gate = validateCalculations(finalResult.problems);
+      const reason = "reason" in gate ? gate.reason : undefined;
+      finalResult._debug = {
+        ...existingDebug,
+        provider: provider.name,
+        gate: gate.ok ? { ok: true } : { ok: false, reason: reason ?? "unknown_reason" },
+      } as any;
     } else {
       if (finalResult?._debug) {
         delete finalResult._debug;
