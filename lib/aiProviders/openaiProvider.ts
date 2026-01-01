@@ -127,8 +127,16 @@ export class OpenAIProvider implements AIProvider {
     debugInfo: Record<string, unknown>;
     timeoutContext: string;
   }): AnalysisResult {
-    const methodHint = this.buildMethodHint(args.problemText);
     const steps = this.buildTimeoutSteps(args.difficulty);
+    const fallbackThinking =
+      "まず情報を整理して、同じ基準で比べられる形を考えてみよう。";
+    const first = steps[0];
+    const spackyThinking =
+      first && typeof first.hint === "string"
+        ? [first.hint, first.solution].filter((t) => typeof t === "string" && t.trim() !== "").join(" ")
+        : fallbackThinking;
+    steps.shift();
+    normalizeStepOrders(steps);
     sanitizeAnswerLeakInSteps(steps);
     ensureFinalCheckStep(steps);
 
@@ -148,9 +156,9 @@ export class OpenAIProvider implements AIProvider {
         {
           id: createProblemId(),
           problem_text: args.problemText,
+          spacky_thinking: spackyThinking,
           steps,
           final_answer: finalAnswer,
-          method_hint: methodHint,
         },
       ],
       _debug: { ...args.debugInfo },
@@ -272,10 +280,6 @@ export class OpenAIProvider implements AIProvider {
     const raw = await this.request(ANALYSIS_PROMPT, ANALYSIS_RESPONSE_SCHEMA, imageBase64);
     console.log(`[${this.name}] raw model text (analyze)`, raw);
     const parsed = this.parseJson<AnalysisResult>(raw, "openai analyze");
-    console.log(`[${this.name}] parsed result method_hint`, parsed?.problems?.[0]?.method_hint);
-    if (!parsed?.problems?.[0]?.method_hint?.pitch) {
-      console.warn(`[${this.name}] method_hint missing in parsed response`);
-    }
     return parsed;
   }
 

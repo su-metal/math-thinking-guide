@@ -57,6 +57,34 @@ const removeMethodHints = (result: AnalysisResult) => {
   }
 };
 
+const FALLBACK_SPACKY_THINKING =
+  "まず情報を整理して、同じ基準で比べられる形を考えてみよう。";
+
+const ensureSpackyThinking = (result: AnalysisResult) => {
+  if (!result || !Array.isArray(result.problems)) return;
+  for (const problem of result.problems) {
+    if (!problem) continue;
+    const existing =
+      typeof problem.spacky_thinking === "string" && problem.spacky_thinking.trim().length > 0;
+    if (existing) continue;
+
+    if (Array.isArray(problem.steps) && problem.steps.length > 0) {
+      const first = problem.steps[0];
+      const parts: string[] = [];
+      if (typeof first?.hint === "string") parts.push(first.hint.trim());
+      if (typeof first?.solution === "string") parts.push(first.solution.trim());
+      const derived = parts.filter(Boolean).join(" ");
+      problem.spacky_thinking = derived || FALLBACK_SPACKY_THINKING;
+      problem.steps.shift();
+      problem.steps.forEach((step, index) => {
+        if (step) step.order = index + 1;
+      });
+    } else {
+      problem.spacky_thinking = FALLBACK_SPACKY_THINKING;
+    }
+  }
+};
+
 export async function POST(req: Request) {
   console.log("[/api/analyze] content-type:", req.headers.get("content-type"));
 
@@ -145,6 +173,7 @@ export async function POST(req: Request) {
 
     finalResult.meta = mergedMeta;
 
+    ensureSpackyThinking(finalResult as AnalysisResult);
     applyCalculationOverrides(finalResult as AnalysisResult);
     removeMethodHints(finalResult as AnalysisResult);
 

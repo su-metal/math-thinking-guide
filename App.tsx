@@ -962,7 +962,8 @@ const App: React.FC = () => {
     const problem = analysisResult.problems[currentProblemIndex];
     const hasMultipleProblems =
       (readProblems?.length ?? analysisResult.problems.length ?? 0) > 1;
-    const isFinishedSteps = currentStepIndex === problem.steps.length;
+    const totalSteps = problem.steps.length + 1;
+    const isFinishedSteps = currentStepIndex === totalSteps;
 
     if (isFinishedSteps) {
       return (
@@ -990,7 +991,7 @@ const App: React.FC = () => {
                       <Eye size={20} /> 答えを見る！
                     </button>
                     <button
-                      onClick={() => setCurrentStepIndex(problem.steps.length - 1)}
+                      onClick={() => setCurrentStepIndex(totalSteps - 1)}
                       className="w-full bg-gray-100 text-gray-500 py-4 rounded-2xl font-black flex items-center justify-center gap-2 active:scale-95 transition-all"
                     >
                       <Undo2 size={18} /> 解説にもどる
@@ -1083,7 +1084,7 @@ const App: React.FC = () => {
                     <button
                       onClick={() => {
                         setShowFinalAnswer(false);
-                        setCurrentStepIndex(problem.steps.length - 1);
+                        setCurrentStepIndex(totalSteps - 1);
                       }}
                       className="w-full bg-blue-50 border-2 border-blue-200 text-blue-600 py-4 rounded-2xl font-black flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
                     >
@@ -1114,17 +1115,15 @@ const App: React.FC = () => {
       );
     }
 
-    const currentStep = problem.steps[currentStepIndex];
-    const prevStep = currentStepIndex > 0 ? problem.steps[currentStepIndex - 1] : null;
-    const isLastStep = currentStepIndex === problem.steps.length - 1;
-    const mh = problem.method_hint;
-
+    const isSpackyThinking = currentStepIndex === 0;
+    const stepIndex = currentStepIndex - 1;
+    const currentStep = isSpackyThinking ? null : problem.steps[stepIndex];
+    const prevStep = currentStepIndex > 1 ? problem.steps[stepIndex - 1] : null;
+    const isLastStep = currentStepIndex === totalSteps - 1;
     const thoughtText =
-      (mh?.bridge && mh.bridge.trim().length > 0)
-        ? `${mh.bridge}\n\n${mh.pitch}`
-        : (mh?.pitch && mh.pitch.trim().length > 0)
-          ? mh.pitch
-          : "まずは問題文に書かれている『わかっていること』と『知りたいこと』を分けてみよう。";
+      typeof problem.spacky_thinking === "string" && problem.spacky_thinking.trim().length > 0
+        ? problem.spacky_thinking.trim()
+        : "まず情報を整理して、同じ基準で比べられる形を考えてみよう。";
 
     return (
       <div className="min-h-screen bg-gray-50 flex flex-col">
@@ -1231,45 +1230,35 @@ const App: React.FC = () => {
                 </div>
               )}
 
-              {currentStepIndex === 0 && (
-                <div className="mb-4">
-                  {(() => {
-                    console.log("[debug] problem.id", problem?.id);
-                    console.log("[debug] problem.method_hint", problem?.method_hint);
-                    console.log("[debug] typeof pitch", typeof problem?.method_hint?.pitch);
-                    console.log("[debug] keys(problem)", problem ? Object.keys(problem) : null);
-                    return null;
-                  })()}
-                  {currentStepIndex === 0 && (
-                    <div className="mb-4">
-                      <ThoughtBlockYellow
-                        title={`スパッキーの考え方${mh?.label ? `（${mh.label}）` : ""}`}
-                        text={thoughtText}
-                      />
-                    </div>
-                  )}
-                </div>
-              )}
 
               <div className="flex items-center justify-between mb-4">
                 <span className={`px-5 py-1 rounded-full text-sm font-black bg-blue-500 text-white shadow-sm shadow-blue-100`}>
-                  ステップ {currentStepIndex + 1}
+                  {isSpackyThinking ? "スパッキーの考え方" : `ステップ ${stepIndex + 1}`}
                 </span>
                 <AITeacher mood="SUPPORTIVE" className="scale-75 -mr-4" />
               </div>
 
               <div className="flex-1 flex flex-col justify-center items-center text-center">
-                <div className="bg-white p-6 rounded-[2rem] border-2 border-dashed border-blue-100 w-full min-h-[160px] flex flex-col items-center justify-center relative">
-                  <p className="text-xl font-black text-gray-800 leading-relaxed">
-                    {currentStep.hint}
-                  </p>
-                </div>
-                <div className="mt-4 flex items-center gap-2">
-                  <Heart className="text-red-400 fill-red-400" size={16} />
-                  <p className="text-xs text-gray-500 font-black">
-                    "だいじょうぶ、きみならできるよ！"
-                  </p>
-                </div>
+                {isSpackyThinking ? (
+                  <ThoughtBlockYellow
+                    title="スパッキーの考え方"
+                    text={thoughtText}
+                  />
+                ) : (
+                  <>
+                    <div className="bg-white p-6 rounded-[2rem] border-2 border-dashed border-blue-100 w-full min-h-[160px] flex flex-col items-center justify-center relative">
+                      <p className="text-xl font-black text-gray-800 leading-relaxed">
+                        {currentStep?.hint}
+                      </p>
+                    </div>
+                    <div className="mt-4 flex items-center gap-2">
+                      <Heart className="text-red-400 fill-red-400" size={16} />
+                      <p className="text-xs text-gray-500 font-black">
+                        "だいじょうぶ、きみならできるよ！"
+                      </p>
+                    </div>
+                  </>
+                )}
               </div>
 
               <div className="mt-8 flex gap-3">
@@ -1300,7 +1289,7 @@ const App: React.FC = () => {
           </div>
 
           <div className="flex justify-center gap-2 py-8">
-            {Array.from({ length: problem.steps.length + 1 }).map((_, idx) => (
+            {Array.from({ length: totalSteps + 1 }).map((_, idx) => (
               <div key={idx} className={`h-2.5 rounded-full transition-all ${idx === currentStepIndex ? 'w-10 bg-blue-500' : 'w-2.5 bg-gray-300'}`} />
             ))}
           </div>

@@ -7,7 +7,9 @@ import {
   DRILL_RESPONSE_SCHEMA,
   PROBLEM_EXTRACTION_PROMPT,
   PROBLEM_EXTRACTION_SCHEMA,
+  OUTLINE_SCHEMA,
   createAnalysisPrompt,
+  createOutlinePrompt,
   createDrillPrompt,
 } from "./prompts";
 
@@ -25,7 +27,9 @@ const GEMINI_COMPLEX_MODEL =
 const GEMINI_ROUTER_MODEL = process.env.GEMINI_ROUTER_MODEL || "gemini-2.5-flash";
 const GEMINI_PRO_MODEL = process.env.GEMINI_PRO_MODEL || GEMINI_COMPLEX_MODEL;
 const GEMINI_MAX_OUTPUT_TOKENS = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS ?? "0") || undefined;
-const TIMEOUT_FULL_MS = 45_000;
+const TIMEOUT_SINGLE_SHOT_MS = 30_000;
+const TIMEOUT_OUTLINE_MS = 12_000;
+const TIMEOUT_STEPS_MS = 18_000;
 
 // ルーティング用の超小さいスキーマ
 const ROUTE_SCHEMA = {
@@ -46,6 +50,12 @@ type RouteResult = {
   route: "simple" | "complex";
   confidence: number;
   signals: string[];
+};
+
+type OutlineResult = {
+  template: string;
+  steps_plan: string[];
+  notes: string[];
 };
 
 const ROUTER_PROMPT = `
@@ -177,6 +187,26 @@ export class GeminiProvider implements AIProvider {
     return name === "AbortError" && message.startsWith("Timeout:");
   }
 
+  private hasForbiddenOperators(result: AnalysisResult): boolean {
+    if (!result || !Array.isArray(result.problems)) return false;
+    for (const problem of result.problems) {
+      if (!problem || !Array.isArray(problem.steps)) continue;
+      for (const step of problem.steps) {
+        const expr = step?.calculation?.expression;
+        if (typeof expr !== "string") continue;
+        if (expr.includes("*") || expr.includes("/")) return true;
+      }
+    }
+    return false;
+  }
+
+  private isHardProblem(args: { problemText: string; difficulty?: string; signals?: any }): boolean {
+    if (args.difficulty === "hard") return true;
+    if (typeof args.problemText === "string" && args.problemText.length > 220) return true;
+    const numConditions = args?.signals?.num_conditions;
+    return typeof numConditions === "number" && numConditions >= 2;
+  }
+
   private async generateContent<T>(args: {
     contents: Parameters<GoogleGenAI["models"]["generateContent"]>[0]["contents"];
     schema: Parameters<
@@ -259,6 +289,49 @@ export class GeminiProvider implements AIProvider {
     }
   }
 
+  private async generateOutline(args: {
+    problemText: string;
+    model: string;
+  }): Promise<OutlineResult> {
+    const prompt = createOutlinePrompt(args.problemText);
+    return this.generateContent<OutlineResult>({
+      contents: [{ text: prompt }],
+      schema: OUTLINE_SCHEMA as any,
+      context: "outline",
+      model: args.model,
+      timeoutMs: TIMEOUT_OUTLINE_MS,
+      maxOutputTokens: 800,
+    });
+  }
+
+  private async generateStepsFromOutline(args: {
+    problemText: string;
+    outline: OutlineResult;
+    model: string;
+    maxOutputTokens: number;
+    temperature?: number;
+  }): Promise<AnalysisResult> {
+    const outlineText = JSON.stringify(args.outline);
+    const append = [
+      "このOUTLINEに従い、steps_planの順でstepsを作る。",
+      "steps_planの各項目を1ステップに対応させ、順番を変えない。",
+      "同じcalculationを重複させない。",
+      "* / は絶対に使わず、× ÷ を使う。",
+      "spacky_thinking は必須。steps に整理ステップを入れない。",
+      `OUTLINE: ${outlineText}`,
+    ].join("\n");
+    const prompt = createAnalysisPrompt(args.problemText, append);
+    return this.generateContent<AnalysisResult>({
+      contents: [{ text: prompt }],
+      schema: ANALYSIS_RESPONSE_SCHEMA,
+      context: "outline_steps",
+      model: args.model,
+      timeoutMs: TIMEOUT_STEPS_MS,
+      maxOutputTokens: args.maxOutputTokens,
+      temperature: args.temperature,
+    });
+  }
+
   async extractProblemText(imageBase64: string): Promise<ExtractedProblem[]> {
     this.ensureKey();
     const inlineImage = imageBase64.split(",")[1] || imageBase64;
@@ -302,6 +375,7 @@ export class GeminiProvider implements AIProvider {
     difficulty: "easy" | "normal" | "hard";
     imageBase64?: string;
     metaTags?: string[];
+    metaSignals?: Record<string, unknown>;
     debug?: boolean;
     promptAppend?: string;
   }): Promise<AnalysisResult> {
@@ -327,94 +401,120 @@ export class GeminiProvider implements AIProvider {
       args.difficulty === "hard" || isGeometry ? GEMINI_COMPLEX_MODEL : GEMINI_SIMPLE_MODEL;
 
     const prompt = createAnalysisPrompt(args.problemText, args.promptAppend);
-    const fastAppend =
-      "短く、冗長を避ける。stepsは必要最小限。solutionは2文以内厳守。計算式は必ず×÷を使い、* / は使わない。";
 
     const isJsonError = (error: unknown) => {
       const message = (error as Error)?.message ?? "";
       return message.includes("JSON");
     };
 
+    const isHard = this.isHardProblem({
+      problemText: args.problemText,
+      difficulty: args.difficulty,
+      signals: args.metaSignals,
+    });
+
     const runSingleShot = async () => {
+      try {
+        const result = await this.generateContent<AnalysisResult>({
+          contents: [{ text: prompt }],
+          schema: ANALYSIS_RESPONSE_SCHEMA,
+          context: "solve_single_shot",
+          model,
+          timeoutMs: TIMEOUT_SINGLE_SHOT_MS,
+          maxOutputTokens,
+        });
+        const gateOk = !this.hasForbiddenOperators(result);
+        const reason = gateOk ? undefined : "forbidden_operator";
+        console.log(
+          `[${this.name}] single_shot attempt=0 ok=${gateOk} timeout=false reason=${reason ?? "n/a"}`
+        );
+        if (!gateOk) {
+          throw new Error("gate_forbidden_operator");
+        }
+        debugInfo.pipelinePath = "single_shot";
+        debugInfo.modelFinal = model;
+        debugInfo.totalMs = Date.now() - totalStart;
+        result._debug = { ...(result._debug ?? {}), ...debugInfo };
+        return result;
+      } catch (error) {
+        const timedOut = this.isTimeoutAbort(error);
+        const reason = timedOut ? "timeout" : isJsonError(error) ? "json_error" : "unknown";
+        console.log(
+          `[${this.name}] single_shot attempt=0 ok=false timeout=${timedOut} reason=${reason}`
+        );
+        throw error;
+      }
+    };
+
+    const runOutlineSteps = async () => {
+      console.log(`[${this.name}] outline_steps start`);
+      const outline = await this.generateOutline({ problemText: args.problemText, model });
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
-          const result = await this.generateContent<AnalysisResult>({
-            contents: [{ text: prompt }],
-            schema: ANALYSIS_RESPONSE_SCHEMA,
-            context: "solve_single_shot",
+          const temperature = attempt === 0 ? undefined : 0.2;
+          const result = await this.generateStepsFromOutline({
+            problemText: args.problemText,
+            outline,
             model,
-            timeoutMs: TIMEOUT_FULL_MS,
-            maxOutputTokens:
-              attempt === 0
-                ? maxOutputTokens
-                : Math.max(maxOutputTokens + 600, Math.round(maxOutputTokens * 1.5)),
+            maxOutputTokens,
+            temperature,
           });
-          debugInfo.pipelinePath = "single_shot";
+          const gateOk = !this.hasForbiddenOperators(result);
+          const reason = gateOk ? undefined : "forbidden_operator";
+          console.log(
+            `[${this.name}] outline_steps attempt=${attempt} ok=${gateOk} timeout=false reason=${reason ?? "n/a"}`
+          );
+          if (!gateOk) {
+            continue;
+          }
+          debugInfo.pipelinePath = "outline_steps";
           debugInfo.modelFinal = model;
           debugInfo.totalMs = Date.now() - totalStart;
           result._debug = { ...(result._debug ?? {}), ...debugInfo };
           return result;
         } catch (error) {
-          if (this.isTimeoutAbort(error)) {
+          const timedOut = this.isTimeoutAbort(error);
+          const reason = timedOut ? "timeout" : isJsonError(error) ? "json_error" : "unknown";
+          console.log(
+            `[${this.name}] outline_steps attempt=${attempt} ok=false timeout=${timedOut} reason=${reason}`
+          );
+          if (attempt === 1) {
             throw error;
           }
-          if (attempt == 0 && isJsonError(error)) {
-            continue;
-          }
-          throw error;
         }
       }
       throw new Error("AIの出力が途中で崩れました。もう一度試してね。");
     };
 
-    try {
-      return await runSingleShot();
-    } catch (error) {
-      if (!this.isTimeoutAbort(error)) {
-        throw error;
-      }
-      console.warn(`[${this.name}] solve_single_shot timeout -> retry with fast config`);
-      const fastPrompt = createAnalysisPrompt(
-        args.problemText,
-        [args.promptAppend, fastAppend].filter(Boolean).join("\n")
-      );
+    if (!isHard) {
       try {
-        const result = await this.generateContent<AnalysisResult>({
-          contents: [{ text: fastPrompt }],
-          schema: ANALYSIS_RESPONSE_SCHEMA,
-          context: "solve_single_shot_fast_retry",
-          model,
-          timeoutMs: TIMEOUT_FULL_MS,
-          maxOutputTokens: 1200,
-          temperature: 0.2,
-          topP: 0.8,
-          candidateCount: 1,
-        });
-        debugInfo.pipelinePath = "single_shot_fast_retry";
-        debugInfo.modelFinal = model;
-        debugInfo.totalMs = Date.now() - totalStart;
-        result._debug = { ...(result._debug ?? {}), ...debugInfo };
-        return result;
-      } catch (retryError) {
-        if (this.isTimeoutAbort(retryError)) {
-          throw retryError;
+        return await runSingleShot();
+      } catch (error) {
+        const shouldFallback =
+          this.isTimeoutAbort(error) || isJsonError(error) || (error as Error)?.message?.includes("gate_");
+        if (!shouldFallback) {
+          throw error;
         }
-        throw retryError;
       }
+    } else {
+      console.log(`[${this.name}] hard detected -> outline_steps`);
     }
+
+    return runOutlineSteps();
 
   }
 
   async analyzeFromText(
     problemText: string,
     difficulty: "easy" | "normal" | "hard",
-    meta?: { tags?: string[] },
+    meta?: { tags?: string[]; signals?: Record<string, unknown> },
     options?: { debug?: boolean; promptAppend?: string }
   ) {
     return this.analyzeFromTextInternal({
       problemText,
       difficulty,
       metaTags: meta?.tags,
+      metaSignals: (meta as any)?.signals,
       debug: options?.debug,
       promptAppend: options?.promptAppend,
     });
@@ -456,11 +556,6 @@ export class GeminiProvider implements AIProvider {
 
     console.log(`[${this.name}] route result`, route);
     console.log(`[${this.name}] model used`, modelToUse);
-    console.log(`[${this.name}] parsed result method_hint`, rawResult?.problems?.[0]?.method_hint);
-
-    if (!rawResult?.problems?.[0]?.method_hint?.pitch) {
-      console.warn(`[${this.name}] method_hint missing in parsed response`);
-    }
     return rawResult;
   }
 

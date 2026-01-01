@@ -318,6 +318,9 @@ export function verifyProblems(problems: MathProblem[]): VerificationResult {
     if (!isNonEmptyString(problem?.final_answer)) {
       issues.push(`problem_${index}_final_answer_missing`);
     }
+    if (!isNonEmptyString(problem?.spacky_thinking)) {
+      issues.push(`problem_${index}_spacky_thinking_missing`);
+    }
     const stepCheck = verifySteps(problem?.steps ?? []);
     if (!stepCheck.ok) {
       issues.push(...stepCheck.issues.map((issue) => `problem_${index}_${issue}`));

@@ -32,6 +32,7 @@ export type MethodHint = {
 export interface MathProblem {
   id: string;
   problem_text: string;
+  spacky_thinking: string;
   steps: MathStep[];
   final_answer: string;
   method_hint?: MethodHint;

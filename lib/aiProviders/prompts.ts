@@ -11,30 +11,71 @@ export const ANALYSIS_PROMPT = `
 【基本方針】
 - 計算は steps[].calculation にのみ書く
 - 計算結果や答えの断定は final_answer のみ
-- hint は「何に注目するか・なぜ今それを考えるか」に加えて、
-  比較問題では「基準をそろえる（1あたり・同じ単位など）」を先に言葉で決める
-  （計算式や具体の割り算の形は hint で確定させない）
+- spacky_thinking は「計算前の整理・基準づくり」だけを書く
+- spacky_thinking の内容は steps に入れない
+- hint は「何に注目するか・なぜ今それを考えるか」を伝える
 - solution は「このステップで分かった意味」を1つだけ伝え、
   安心する問いで終える
-- solution では、calculation に書いた数値（結果・途中の数）を引用しない
-- solution では、答えっぽい確定表現（「これが答え」「決まった」など）を言わない
+- solution では calculation に書いた数値（結果・途中の数）を引用しない
+- solution では答えを確定させる表現を使わない
 - 子供が自分で判断する余地を残すことを最優先する
-- 計算結果や答えの断定は final_answer のみ（「答え：…」「【理由】…」の2段落で書く）
+- final_answer は必ず
+  「答え：…」「【理由】…」の2段落構成で書く
+
+【spacky_thinking のルール】
+- 計算や式、手法名は書かない
+- 何を比べたいか・そろえたいか・注目したい情報の整理まで
+- 次に何を計算するかを断定しない（候補提示は可）
+- 「同じ基準で考える」「1あたりにそろえる」などの方針はここに集約する
+
+【spacky_thinking と steps の役割分離ルール】
+- spacky_thinking に書いた内容を steps[].hint で言い直してはいけない
+- steps の最初のステップは、spacky_thinking で決めた基準を
+  「前提」として扱い、別の役割を持たせる
+- 基準づくり・視点の整理は spacky_thinking のみに書く
+
+【計算ステップの hint 制約】
+- calculation を含むステップの hint では、
+  計算方法を断定・言い切りで説明してはいけない
+- hint は必ず「どう考える？」「どんな計算になりそう？」
+  のように方向づけだけを行う
+- 「〜で割る」「〜を÷する」など、
+  calculation の内容が直接分かる表現は禁止
+
+【意味づけステップの必須化】
+- 計算で数値を出したあと、final_answer の前に
+  「その数が何を表すか」を確かめるステップを必ず1つ入れる
+- このステップでは新しい計算をしない（calculation を付けない）
+- hint は「単位」「1あたり」「何を表す数か」の確認にとどめる
+- solution は「この数の意味」を1つだけ言い、短い問いで終える
+
+【比較ステップの簡潔化ルール】
+- 比較のみを行うステップでは、数値を再掲しない
+- hint は「どちらが大きいか」「同じ基準で比べられているか」
+  といった視点の提示に限定する
+- 数値確認は直前のステップを見返す前提で書く
+
+【重複防止】
+- 同じ calculation（同じ expression と result）を複数ステップに出さない
+- 計算するステップは原則1回にまとめ、
+  以降は意味づけ・比較・照合に役割を分ける
 
 【良い解説の基準】
 - 計算前に「何をそろえる・比べるか」が分かる
 - 計算後に「その数が何を表すか」が分かる
 - 比較問題では、結果を並べて意味を考えるステップがある
-【ステップ設計の型（汎用・重要）】
-- 似た役割のステップを連続させない（同じことを言い換えただけのステップは禁止）
-- 1つのステップには役割を1つだけ持たせる（混ぜない）
 
-比較・混み具合・1あたり・速さ・密度など「基準をそろえて比べる」問題は、原則として次の順にする：
-1) 何を比べたいか と 基準（1あたり・同じ単位など）を決めるステップ（計算なし）
-2) Aの「基準あたり」を出すステップ（計算あり）
-3) Bの「基準あたり」を出すステップ（計算あり）
-4) 同じ基準にそろえた事実を確認してから、大小を比べるステップ（計算なし）
+【ステップ設計の型（汎用）】
+- 1つのステップには役割を1つだけ持たせる
+- 同じ役割のステップを連続させない
 
+比較・混み具合・1あたり・速さ・密度など
+「基準をそろえて比べる」問題は、原則として次の順にする：
+
+1) spacky_thinking で「何を比べたいか」と「基準」を整理（計算なし）
+2) Aの基準あたりを出す（計算あり）
+3) Bの基準あたりを出す（計算あり）
+4) 同じ基準でそろった事実を確認し、比較する（計算なし）
 
 【表現のトーン】
 - 子供に話しかける、やさしい会話調
@@ -46,7 +87,6 @@ export const ANALYSIS_PROMPT = `
 - または「最小公倍数(4と6)」のような日本語表現
 - *, /, LCM, GCD などは禁止
 
-
 【出力形式】
 以下のJSON構造のみを許可します：
 
@@ -56,29 +96,52 @@ export const ANALYSIS_PROMPT = `
     {
       "id": "unique_id",
       "problem_text": "...",
+      "spacky_thinking": "...",
       "steps": [
-  {
-    "order": 1,
-    "hint": "表の右側を見ると、1組の人数とメダルの数が書いてあるね。ここを先に見ておくと、あとで『1人あたり』が考えやすくなるよ。どの数字が見つかるかな？",
-    "solution": "1組の人数とメダルの数がそろったね。ここまで大丈夫そうかな？",
-    "calculation": {
-      "expression": "10 ÷ 4",
-      "result": 2.5,
-      "unit": "個",
-      "note": "1人あたりのメダルの数"
-    }
-  }
-],
-
-      "final_answer": "答え：500人\\n\\n【理由】30000人の人口を60平方キロメートルの面積で等しく分ける（30000÷500）と、1平方キロメートルあたり500人になるからです。"
+        {
+          "order": 1,
+          "hint": "...",
+          "solution": "...",
+          "calculation": {
+            "expression": "...",
+            "result": 0,
+            "unit": "...",
+            "note": "..."
+          }
+        }
+      ],
+      "final_answer": "答え：...\\n\\n【理由】..."
     }
   ]
 }
 `;
 
+export const OUTLINE_PROMPT = `
+あなたは算数問題の解き方の「骨組み」だけを作ります。
+出力は必ずJSONのみ。計算式・計算結果・steps本体・final_answerは絶対に出さないでください。
+
+【出力形式(JSONのみ)】
+{
+  "template": "unit_rate_compare | lcm_square | single_calc | multi_step_compare | geometry_property | other",
+  "steps_plan": ["役割1", "役割2"],
+  "notes": ["注意1", "注意2"]
+}
+
+【制約】
+- steps_plan は短い役割だけを書く（手順や式の具体化は禁止）
+- 計算式、計算結果、答えの断定は禁止
+- notes は注意点だけ（任意）
+`.trim();
+
+
+
 export function createAnalysisPrompt(problemText: string, extraInstruction?: string) {
   const extra = extraInstruction ? `\n\n【追加ルール】\n${extraInstruction}\n` : "";
   return `${ANALYSIS_PROMPT}${extra}\n【問題文】\n${problemText}\n`.trim();
+}
+
+export function createOutlinePrompt(problemText: string) {
+  return `${OUTLINE_PROMPT}\n\n【問題文】\n${problemText}\n`.trim();
 }
 
 export const DRILL_PROMPT = `
@@ -106,6 +169,7 @@ export const ANALYSIS_RESPONSE_SCHEMA = {
         properties: {
           id: { type: "string" },
           problem_text: { type: "string" },
+          spacky_thinking: { type: "string" },
           final_answer: { type: "string" },
           steps: {
             type: "array",
@@ -135,12 +199,23 @@ export const ANALYSIS_RESPONSE_SCHEMA = {
 
           },
         },
-        required: ["id", "problem_text", "steps", "final_answer"],
+        required: ["id", "problem_text", "spacky_thinking", "steps", "final_answer"],
       },
     },
   },
   required: ["status", "problems"],
 };
+
+export const OUTLINE_SCHEMA = {
+  type: "object",
+  additionalProperties: false,
+  properties: {
+    template: { type: "string" },
+    steps_plan: { type: "array", items: { type: "string" } },
+    notes: { type: "array", items: { type: "string" } },
+  },
+  required: ["template", "steps_plan", "notes"],
+} as const;
 
 export const ANALYSIS_PLAN_SCHEMA = {
   type: "object",
@@ -386,6 +461,7 @@ export function createSolvePrompt(args: {
 JSONだけを出力し、余計な説明はしません。
 
 【重要】
+- spacky_thinking に計算前の整理だけを書く（式・手法名・答えの断定は禁止）
 - steps は抽象的にしない。各ステップに具体的な計算や数値を必ず含める。
 - steps の hint/solution では「答え」「正解」という語を使わない（final_answer のみ可）。
 - steps の order は 1 からの連番。
@@ -398,6 +474,7 @@ JSONだけを出力し、余計な説明はしません。
     {
       "id": "unique_id",
       "problem_text": "...",
+      "spacky_thinking": "...",
       "steps": [
         { "order": 1, "hint": "...", "solution": "...", "calculation": { "expression": "...", "result": 0 } }
       ],
