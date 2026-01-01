@@ -1,11 +1,9 @@
-// NOTE:
-// This route is kept only for backward compatibility.
-// New flow should use /api/read -> /api/solve.
-
+// solve only accepts a single problem_text selected by the user.
+// Do NOT re-extract problems from image here.
 
 import { NextResponse } from "next/server";
 import { getAIProvider } from "@/lib/aiProviders/provider";
-import { estimateLevel } from "@/lib/levelEstimator";
+import { estimateLevel, type Difficulty, type LevelMeta } from "@/lib/levelEstimator";
 import { computeExpression } from "@/lib/math/computeExpression";
 import { validateCalculations } from "@/lib/routing/qualityGate";
 import type { AnalysisResult } from "@/types";
@@ -18,7 +16,7 @@ const provider = getAIProvider();
 const normalizeCalcExpression = (expression: string) =>
   expression.trim().replace(/\*/g, "×").replace(/\//g, "÷").replace(/\s+/g, " ");
 
-const normalizeCalculationExpressions = (result: AnalysisResult | undefined) => {
+const normalizeCalculationExpressions = (result: AnalysisResult) => {
   if (!result || !Array.isArray(result.problems)) return;
   for (const problem of result.problems) {
     if (!problem || !Array.isArray(problem.steps)) continue;
@@ -37,12 +35,17 @@ const applyCalculationOverrides = (result: AnalysisResult) => {
     for (const step of problem.steps) {
       const calc = step?.calculation;
       if (!calc || typeof calc.expression !== "string") continue;
-      const expr = calc.expression;
+      const expr = calc.expression.trim();
       if (expr.includes("最小公倍数") || expr.includes("最大公約数")) continue;
-      if (!/^[0-9+\-×÷().\s]+$/.test(expr)) continue;
+      if (!/^[0-9+\-×÷().\s]+$/.test(expr)) {
+        delete step.calculation;
+        continue;
+      }
       const computed = computeExpression(expr);
       if (typeof computed === "number") {
         calc.result = computed;
+      } else {
+        delete step.calculation;
       }
     }
   }
@@ -86,126 +89,146 @@ const ensureSpackyThinking = (result: AnalysisResult) => {
 };
 
 export async function POST(req: Request) {
-  console.log("[/api/analyze] content-type:", req.headers.get("content-type"));
+  let payload: {
+    problem_text?: string;
+    meta?: LevelMeta;
+    difficulty?: Difficulty;
+    debug?: boolean;
+  } = {};
 
-  const rawText = await req.text();
-  console.log("[/api/analyze] raw body:", rawText.slice(0, 300));
-
-  let payload: { imageBase64?: string; debug?: boolean } = {};
   try {
-    payload = rawText ? JSON.parse(rawText) : {};
+    payload = await req.json();
   } catch (error) {
     console.error(`[${provider.name}] Failed to parse request body:`, error);
-    console.log("[/api/analyze] parsed keys:", null);
     return NextResponse.json({ error: DEFAULT_ERROR_MESSAGE }, { status: 400 });
   }
 
-  console.log("[/api/analyze] parsed keys:", Object.keys(payload || {}));
-
-  const { imageBase64, debug } = payload;
-  if (!imageBase64) {
+  const { problem_text, meta, difficulty, debug } = payload;
+  if (!problem_text) {
     return NextResponse.json({ error: DEFAULT_ERROR_MESSAGE }, { status: 400 });
   }
 
   try {
-    const extractedProblems = await provider.extractProblemText(imageBase64);
-    const problemText = extractedProblems[0]?.problem_text?.trim();
-    if (!problemText) {
-      return NextResponse.json({ error: DEFAULT_ERROR_MESSAGE }, { status: 400 });
-    }
-    const estimatedMeta = estimateLevel(problemText);
-
-    const retryPromptAppend =
-      "前の出力で calculation が壊れていた。calculation を出すのは計算が必要なステップだけ。expression は算数の計算式か「最小公倍数(4と6)」「最大公約数(24と40)」のような日本語だけ、カンマや等号は使わない。最小公倍数/最大公約数の result は定義どおり必ず割り切れる値にする。result は数値のみ。";
-
+    const resolvedMeta = meta ?? estimateLevel(problem_text);
+    const resolvedDifficulty = (meta?.difficulty ?? difficulty ?? resolvedMeta.difficulty) as Difficulty;
     let finalResult: AnalysisResult | undefined;
+    let finalGateReason: string | undefined;
+    const gateAttempts: Array<{ attempt: number; ok: boolean; reason?: string }> = [];
     for (let attempt = 0; attempt < 2; attempt += 1) {
-      const candidate = await provider.analyzeFromText(
-        problemText,
-        estimatedMeta.difficulty,
-        estimatedMeta,
-        { debug, promptAppend: attempt === 1 ? retryPromptAppend : undefined }
-      );
-
+      const candidate = await provider.analyzeFromText(problem_text, resolvedDifficulty, resolvedMeta, {
+        debug,
+      });
+      if (!candidate) {
+        const reason = "no_candidate";
+        gateAttempts.push({ attempt, ok: false, reason });
+        finalGateReason = reason;
+        if (debug) {
+          console.log(
+            `[${provider.name}] solve gate check attempt=${attempt} ok=false reason=${reason}`,
+            []
+          );
+        }
+        continue;
+      }
+      if (!Array.isArray(candidate.problems) || candidate.problems.length === 0) {
+        const reason = "no_problems";
+        gateAttempts.push({ attempt, ok: false, reason });
+        finalGateReason = reason;
+        if (debug) {
+          console.log(
+            `[${provider.name}] solve gate check attempt=${attempt} ok=false reason=${reason}`,
+            []
+          );
+        }
+        continue;
+      }
       normalizeCalculationExpressions(candidate as AnalysisResult);
-      const validation = validateCalculations(candidate?.problems);
+      const validation = validateCalculations(candidate.problems);
+      const reason = validation.ok
+        ? undefined
+        : "reason" in validation
+          ? validation.reason
+          : "unknown_reason";
+      gateAttempts.push({ attempt, ok: validation.ok, ...(reason ? { reason } : {}) });
       if (debug) {
         const calcList =
-          candidate?.problems?.flatMap((problem) =>
+          candidate.problems.flatMap((problem) =>
             Array.isArray(problem?.steps)
               ? problem.steps
-                  .map((step) => step?.calculation)
-                  .filter((calc) => calc && typeof calc.expression === "string")
-                  .map((calc) => ({
-                    expression: calc!.expression,
-                    result: calc!.result,
-                  }))
+                .map((step) => step?.calculation)
+                .filter((calc) => calc && typeof calc.expression === "string")
+                .map((calc) => ({
+                  expression: calc!.expression,
+                  result: calc!.result,
+                }))
               : []
           ) ?? [];
-        const reason = "reason" in validation ? validation.reason : undefined;
         console.log(
-          `[${provider.name}] gate check attempt=${attempt} ok=${validation.ok} reason=${reason ?? "n/a"}`,
+          `[${provider.name}] solve gate check attempt=${attempt} ok=${validation.ok} reason=${reason ?? "n/a"}`,
           calcList
         );
       }
       if (!validation.ok) {
-        const reason = "reason" in validation ? validation.reason : "unknown_reason";
-        console.warn(
-          `[${provider.name}] invalid calculation output, retrying:`,
-          reason
-        );
+        finalGateReason = reason ?? "unknown_reason";
         continue;
       }
+      finalGateReason = undefined;
       finalResult = candidate;
       break;
     }
-
     if (!finalResult) {
-      throw new Error("calculation_validation_failed");
+      if (!debug) {
+        return NextResponse.json({ error: DEFAULT_ERROR_MESSAGE }, { status: 400 });
+      }
+      return NextResponse.json(
+        {
+          error: DEFAULT_ERROR_MESSAGE,
+          _debug: {
+            provider: provider.name,
+            route: "/api/solve",
+            gate: { ok: false, reason: finalGateReason ?? "unknown_reason" },
+            gateAttempts,
+          },
+        } as any,
+        { status: 400 }
+      );
     }
 
     const existingMeta = finalResult.meta ?? {};
-    const mergedMeta = { ...estimatedMeta, ...existingMeta };
+    const mergedMeta = { ...resolvedMeta, ...existingMeta };
     const locale = (mergedMeta as any).locale;
     if (typeof locale !== "string" || locale.trim() === "") {
       (mergedMeta as any).locale = "ja";
     }
-
     finalResult.meta = mergedMeta;
 
     ensureSpackyThinking(finalResult as AnalysisResult);
     applyCalculationOverrides(finalResult as AnalysisResult);
     removeMethodHints(finalResult as AnalysisResult);
 
-    // debug=true のときだけ provider名を付与（型を壊さず最低限）
     if (debug) {
       const existingDebug =
-        finalResult && typeof finalResult._debug === "object" && finalResult._debug !== null
-          ? finalResult._debug
+        finalResult && typeof (finalResult as any)._debug === "object" && (finalResult as any)._debug !== null
+          ? (finalResult as any)._debug
           : {};
-      const gate = validateCalculations(finalResult.problems);
-      const reason = "reason" in gate ? gate.reason : undefined;
-      finalResult._debug = {
+
+      (finalResult as any)._debug = {
         ...existingDebug,
         provider: provider.name,
-        gate: gate.ok ? { ok: true } : { ok: false, reason: reason ?? "unknown_reason" },
-      } as any;
-    } else {
+        route: "/api/solve",
+        gate: finalGateReason ? { ok: false, reason: finalGateReason } : { ok: true },
+        gateAttempts,
+      };
+    }
+    else {
       if (finalResult?._debug) {
         delete finalResult._debug;
       }
     }
 
     return NextResponse.json(finalResult);
-  } catch (error: any) {
-    console.error(`[${provider.name}] AI Analysis failed:`, error);
-    const message = error?.message;
-    const isKeyMissing =
-      typeof message === "string" && /API_KEY is not set/i.test(message);
-
-    return NextResponse.json(
-      { error: isKeyMissing ? message : DEFAULT_ERROR_MESSAGE },
-      { status: isKeyMissing ? 500 : 400 }
-    );
+  } catch (error) {
+    console.error(`[${provider.name}] Solve failed:`, error);
+    return NextResponse.json({ error: DEFAULT_ERROR_MESSAGE }, { status: 400 });
   }
 }

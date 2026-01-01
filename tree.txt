@@ -11,10 +11,10 @@ package.json
 postcss.config.cjs
 README.md
 tailwind.config.cjs
+tailwind不具合の原因と再発防止まとめ.md
 tree.txt
 tsconfig.json
 types.ts
-vite.config.ts
 app
   globals.css
   layout.tsx
@@ -24,5 +24,18 @@ app
       route.ts
     drill
       route.ts
+diagnostics
+  tailwind-report.md
+lib
+  aiProviders
+    geminiProvider.ts
+    openaiProvider.ts
+    prompts.ts
+    provider.ts
+  supabase
+    admin.ts
+    server.ts
 services
   geminiService.ts
+tools
+  diag-tailwind.mjs

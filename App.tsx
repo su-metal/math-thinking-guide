@@ -1,8 +1,8 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { AppScreen, AnalysisResult, HistoryItem, DrillProblem, DrillResult, MathProblem } from './types';
-import { analyzeMathProblem, generateDrillProblems } from './services/geminiService';
+import { AppScreen, AnalysisResult, HistoryItem, DrillProblem, DrillResult, MathProblem, ReadResult } from './types';
+import { readMathProblem, solveMathProblem, generateDrillProblems } from './services/geminiService';
 import {
   Camera,
   Image as ImageIcon,
@@ -45,6 +45,12 @@ const isQuotaExceededError = (error: unknown): boolean => {
     return typeof errName === 'string' && /quota/i.test(errName);
   }
   return false;
+};
+
+const isAbortError = (error: unknown): boolean => {
+  if (!error || typeof error !== 'object') return false;
+  const name = (error as { name?: string }).name;
+  return name === 'AbortError';
 };
 
 const persistHistory = (items: HistoryItem[]): HistoryItem[] => {
@@ -446,6 +452,9 @@ const App: React.FC = () => {
   const [currentScreen, setCurrentScreen] = useState<AppScreen>(AppScreen.SPLASH);
   const [prevScreen, setPrevScreen] = useState<AppScreen | null>(null);
   const [analysisResult, setAnalysisResult] = useState<AnalysisResult | null>(null);
+  const [analysisPhase, setAnalysisPhase] = useState<"idle" | "reading" | "read_done" | "solving" | "done" | "error">("idle");
+  const [readProblemText, setReadProblemText] = useState<string | null>(null);
+  const [readProblems, setReadProblems] = useState<ReadResult["problems"] | null>(null);
   const [drillResult, setDrillResult] = useState<DrillResult | null>(null);
   const [tempImage, setTempImage] = useState<string | null>(null);
   const [croppedImage, setCroppedImage] = useState<string | null>(null);
@@ -460,6 +469,15 @@ const App: React.FC = () => {
   const [showLimitReachedModal, setShowLimitReachedModal] = useState(false);
   const [isLoadingDrills, setIsLoadingDrills] = useState(false);
   const [showFullImage, setShowFullImage] = useState(false);
+  const [showPrevCalc, setShowPrevCalc] = useState(false);
+  const requestIdRef = useRef(0);
+  const readAbortRef = useRef<AbortController | null>(null);
+  const solveAbortRef = useRef<AbortController | null>(null);
+
+  useEffect(() => {
+    setShowPrevCalc(false);
+  }, [currentStepIndex]);
+
 
   useEffect(() => {
     const timer = setTimeout(() => {
@@ -544,19 +562,48 @@ const App: React.FC = () => {
     setCroppedImage(img);
     setCurrentScreen(AppScreen.LOADING);
     setShowFinalAnswer(false);
+    setAnalysisResult(null);
+    setReadProblemText(null);
+    setReadProblems(null);
+    setAnalysisPhase("reading");
+
+    requestIdRef.current += 1;
+    const requestId = requestIdRef.current;
+    readAbortRef.current?.abort();
+    solveAbortRef.current?.abort();
+
     try {
-      const result = await analyzeMathProblem(img);
+      const readController = new AbortController();
+      readAbortRef.current = readController;
+      const readResult = await readMathProblem(img, readController.signal);
+      if (requestIdRef.current !== requestId) return;
+
+      const extractedProblems = Array.isArray(readResult.problems) ? readResult.problems : [];
+      if (extractedProblems.length === 0) {
+        throw new Error("問題が見つかりませんでした。もっと明るい場所で、問題を大きく撮ってみてね。");
+      }
+
+      setReadProblemText(extractedProblems[0]?.problem_text ?? null);
+      setReadProblems(extractedProblems);
+      setAnalysisPhase("read_done");
+
+      if (extractedProblems.length > 1) {
+        setCurrentScreen(AppScreen.PROBLEM_SELECT);
+        return;
+      }
+
+      const solveController = new AbortController();
+      solveAbortRef.current = solveController;
+      setAnalysisPhase("solving");
+      const result = await solveMathProblem(extractedProblems[0].problem_text, undefined, solveController.signal);
+      if (requestIdRef.current !== requestId) return;
+
+      console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
       setAnalysisResult(result);
       setCurrentProblemIndex(0);
       setCurrentStepIndex(0);
-
-      if (result.problems && result.problems.length > 1) {
-        setCurrentScreen(AppScreen.PROBLEM_SELECT);
-      } else if (result.problems && result.problems.length === 1) {
-        setCurrentScreen(AppScreen.RESULT);
-      } else {
-        throw new Error("問題が見つかりませんでした。もっと明るい場所で、問題を大きく撮ってみてね。");
-      }
+      setAnalysisPhase("done");
+      setCurrentScreen(AppScreen.RESULT);
 
       const historyItem: HistoryItem = {
         id: Date.now().toString(),
@@ -564,15 +611,62 @@ const App: React.FC = () => {
         image: img,
         result: result
       };
+      console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
       saveHistory(historyItem);
       decreaseTries();
     } catch (err: any) {
+      if (isAbortError(err)) {
+        return;
+      }
+      setAnalysisPhase("error");
       alert(err.message || "エラーがおきました。もういちど試してね。");
       setCurrentScreen(AppScreen.HOME);
     }
   };
 
-  const selectProblem = (index: number) => {
+  const selectProblem = async (index: number) => {
+    const selectableProblems =
+      readProblems ?? (analysisResult ? analysisResult.problems : []);
+    const selected = selectableProblems[index];
+    if (!selected) return;
+
+    if (!analysisResult && readProblems) {
+      setReadProblemText(selected.problem_text);
+      setAnalysisPhase("solving");
+      setCurrentScreen(AppScreen.LOADING);
+
+      const solveController = new AbortController();
+      solveAbortRef.current = solveController;
+
+      try {
+        const result = await solveMathProblem(selected.problem_text, undefined, solveController.signal);
+        console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
+        setAnalysisResult(result);
+        setCurrentProblemIndex(0);
+        setCurrentStepIndex(0);
+        setAnalysisPhase("done");
+        setCurrentScreen(AppScreen.RESULT);
+
+        const historyItem: HistoryItem = {
+          id: Date.now().toString(),
+          timestamp: Date.now(),
+          image: croppedImage ?? "",
+          result: result
+        };
+        console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
+        saveHistory(historyItem);
+        decreaseTries();
+      } catch (err: any) {
+        if (isAbortError(err)) {
+          return;
+        }
+        setAnalysisPhase("error");
+        alert(err.message || "エラーがおきました。もういちど試してね。");
+        setCurrentScreen(AppScreen.HOME);
+      }
+      return;
+    }
+
     setCurrentProblemIndex(index);
     setCurrentStepIndex(0);
     setShowFinalAnswer(false);
@@ -765,11 +859,53 @@ const App: React.FC = () => {
       </div>
       <h2 className="text-2xl font-black text-gray-800 mb-2">スパッキー先生が考え中...</h2>
       <p className="text-gray-500 font-bold">問題をじっくり見ているよ。ちょっとまってね！</p>
+
+      <div className="mt-8 w-full max-w-md space-y-4">
+        <div className="bg-white rounded-2xl border border-blue-100 shadow-sm px-5 py-4 text-left">
+          <div className="flex items-center gap-2 mb-1">
+            {analysisPhase === "reading" ? (
+              <RefreshCw className="text-blue-500 animate-spin" size={16} />
+            ) : (
+              <Check className="text-green-500" size={16} />
+            )}
+            <p className="text-sm font-black text-gray-700">読み取り</p>
+          </div>
+          <p className="text-xs font-bold text-gray-400">
+            {analysisPhase === "reading" ? "いま文字をよみとっているよ" : "読み取りができたよ"}
+          </p>
+        </div>
+
+        {readProblemText && (
+          <div className="bg-white rounded-3xl border-2 border-blue-100 shadow-sm px-6 py-5 text-left">
+            <p className="text-[10px] text-blue-400 font-black uppercase tracking-widest mb-2">問題文</p>
+            <p className="text-sm font-black text-gray-700 leading-relaxed">
+              {readProblemText}
+            </p>
+          </div>
+        )}
+
+        {analysisPhase === "solving" && (
+          <div className="bg-white rounded-2xl border border-blue-100 shadow-sm px-5 py-4 text-left space-y-3">
+            <div className="flex items-center gap-2">
+              <RefreshCw className="text-indigo-500 animate-spin" size={16} />
+              <p className="text-sm font-black text-gray-700">解き方を作っているよ</p>
+            </div>
+            {[0, 1, 2].map((idx) => (
+              <div key={idx} className="bg-blue-50/70 rounded-2xl px-4 py-3">
+                <div className="h-3 w-24 bg-blue-200/70 rounded-full mb-2 animate-pulse"></div>
+                <div className="h-3 w-full bg-blue-100 rounded-full animate-pulse"></div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </div>
   );
 
   const renderProblemSelect = () => {
-    if (!analysisResult) return null;
+    const selectableProblems =
+      readProblems ?? (analysisResult ? analysisResult.problems : []);
+    if (!selectableProblems.length) return null;
     return (
       <div className="min-h-screen bg-blue-50 flex flex-col">
         <Header title="どの問題を解く？" leftIcon={<X />} onLeftClick={() => setCurrentScreen(AppScreen.HOME)} />
@@ -777,12 +913,12 @@ const App: React.FC = () => {
           <div className="mb-6 flex flex-col items-center">
             <AITeacher mood="HAPPY" />
             <p className="text-blue-600 font-black mt-2 flex items-center gap-2">
-              <LayoutList size={20} /> {analysisResult.problems.length}個の問題が見つかったよ！
+              <LayoutList size={20} /> {selectableProblems.length}個の問題が見つかったよ！
             </p>
           </div>
 
           <div className="w-full flex overflow-x-auto snap-x snap-mandatory scrollbar-hide gap-6 px-4 pb-8">
-            {analysisResult.problems.map((p, idx) => (
+            {selectableProblems.map((p, idx) => (
               <div
                 key={p.id || idx}
                 className="snap-center shrink-0 w-[85vw] max-w-sm bg-white rounded-[2.5rem] shadow-xl p-8 flex flex-col border-b-8 border-blue-400 border-r border-l border-t border-gray-100"
@@ -811,7 +947,7 @@ const App: React.FC = () => {
           </div>
 
           <div className="flex gap-2">
-            {analysisResult.problems.map((_, idx) => (
+            {selectableProblems.map((_, idx) => (
               <div key={idx} className={`w-2 h-2 rounded-full bg-blue-200`} />
             ))}
           </div>
@@ -824,7 +960,10 @@ const App: React.FC = () => {
   const renderResult = () => {
     if (!analysisResult || !analysisResult.problems[currentProblemIndex]) return null;
     const problem = analysisResult.problems[currentProblemIndex];
-    const isFinishedSteps = currentStepIndex === problem.steps.length;
+    const hasMultipleProblems =
+      (readProblems?.length ?? analysisResult.problems.length ?? 0) > 1;
+    const totalSteps = problem.steps.length + 1;
+    const isFinishedSteps = currentStepIndex === totalSteps;
 
     if (isFinishedSteps) {
       return (
@@ -852,7 +991,7 @@ const App: React.FC = () => {
                       <Eye size={20} /> 答えを見る！
                     </button>
                     <button
-                      onClick={() => setCurrentStepIndex(problem.steps.length - 1)}
+                      onClick={() => setCurrentStepIndex(totalSteps - 1)}
                       className="w-full bg-gray-100 text-gray-500 py-4 rounded-2xl font-black flex items-center justify-center gap-2 active:scale-95 transition-all"
                     >
                       <Undo2 size={18} /> 解説にもどる
@@ -871,11 +1010,58 @@ const App: React.FC = () => {
                     <AITeacher mood="PRAISING" className="scale-125" />
                   </div>
                   <h3 className="text-xl font-black text-gray-400 mb-2 uppercase">さいごの答え</h3>
+
                   <div className="bg-green-50 p-6 rounded-[2rem] border-4 border-green-200 mb-8 relative">
                     <Trophy className="absolute -top-6 -right-6 text-yellow-400 rotate-12" size={48} />
-                    <p className="text-3xl font-black text-green-700">
-                      {problem.final_answer}
-                    </p>
+
+                    {(() => {
+                      const raw = (problem.final_answer ?? "").trim();
+
+                      // 1) まず「答え：」を抽出（あれば）
+                      const answerMatch = raw.match(/^答え：\s*(.*?)(?:\n|$)/);
+                      const answerLine = answerMatch ? answerMatch[1].trim() : "";
+
+                      // 2) 「【理由】」以降を抽出（あれば）
+                      const reasonSplit = raw.split("【理由】");
+                      const reasonText = reasonSplit.length >= 2 ? reasonSplit.slice(1).join("【理由】").trim() : "";
+
+                      // 3) どちらも取れないケースはそのまま段落化
+                      const fallbackLines = raw
+                        .replace(/^答え：\s*/g, "")
+                        .split(/\n+/)
+                        .map((s) => s.trim())
+                        .filter(Boolean);
+
+                      return (
+                        <div className="space-y-4">
+                          {/* タイトル（答え） */}
+                          <div className="flex items-center gap-3">
+                            <span className="inline-flex items-center px-3 py-1 rounded-full bg-green-200 text-green-800 text-xs font-black">
+                              さいごの答え
+                            </span>
+                            <p className="text-2xl sm:text-3xl font-black text-green-800">
+                              {answerLine ? `答え：${answerLine}` : "答え"}
+                            </p>
+                          </div>
+
+                          {/* 理由（段落表示） */}
+                          {reasonText ? (
+                            <div className="bg-white/60 rounded-2xl p-4 border border-green-200">
+                              <p className="text-sm font-black text-green-700 mb-2">理由</p>
+                              <p className="text-[15px] sm:text-base font-bold text-green-900 leading-7 whitespace-pre-wrap">
+                                {reasonText}
+                              </p>
+                            </div>
+                          ) : (
+                            <div className="bg-white/60 rounded-2xl p-4 border border-green-200">
+                              <p className="text-[15px] sm:text-base font-bold text-green-900 leading-7 whitespace-pre-wrap">
+                                {fallbackLines.join("\n\n")}
+                              </p>
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   <div className="w-full space-y-3">
@@ -898,14 +1084,14 @@ const App: React.FC = () => {
                     <button
                       onClick={() => {
                         setShowFinalAnswer(false);
-                        setCurrentStepIndex(problem.steps.length - 1);
+                        setCurrentStepIndex(totalSteps - 1);
                       }}
                       className="w-full bg-blue-50 border-2 border-blue-200 text-blue-600 py-4 rounded-2xl font-black flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
                     >
                       <Undo2 size={20} /> 解説にもどる
                     </button>
 
-                    {analysisResult.problems.length > 1 && (
+                    {hasMultipleProblems && (
                       <button
                         onClick={() => setCurrentScreen(AppScreen.PROBLEM_SELECT)}
                         className="w-full bg-white border-2 border-gray-100 text-gray-500 py-4 rounded-2xl font-black flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
@@ -929,16 +1115,22 @@ const App: React.FC = () => {
       );
     }
 
-    const currentStep = problem.steps[currentStepIndex];
-    const prevStep = currentStepIndex > 0 ? problem.steps[currentStepIndex - 1] : null;
-    const isLastStep = currentStepIndex === problem.steps.length - 1;
+    const isSpackyThinking = currentStepIndex === 0;
+    const stepIndex = currentStepIndex - 1;
+    const currentStep = isSpackyThinking ? null : problem.steps[stepIndex];
+    const prevStep = currentStepIndex > 1 ? problem.steps[stepIndex - 1] : null;
+    const isLastStep = currentStepIndex === totalSteps - 1;
+    const thoughtText =
+      typeof problem.spacky_thinking === "string" && problem.spacky_thinking.trim().length > 0
+        ? problem.spacky_thinking.trim()
+        : "まず情報を整理して、同じ基準で比べられる形を考えてみよう。";
 
     return (
       <div className="min-h-screen bg-gray-50 flex flex-col">
         <Header
           title="スパッキーのガイド"
-          leftIcon={analysisResult.problems.length > 1 ? <LayoutList /> : <X />}
-          onLeftClick={() => analysisResult.problems.length > 1 ? setCurrentScreen(AppScreen.PROBLEM_SELECT) : setCurrentScreen(AppScreen.HOME)}
+          leftIcon={hasMultipleProblems ? <LayoutList /> : <X />}
+          onLeftClick={() => hasMultipleProblems ? setCurrentScreen(AppScreen.PROBLEM_SELECT) : setCurrentScreen(AppScreen.HOME)}
         />
         <main className="flex-1 flex flex-col p-4 overflow-y-auto scrollbar-hide">
           <div className="bg-white rounded-2xl p-5 shadow-sm mb-4 border border-gray-100 shrink-0">
@@ -974,8 +1166,63 @@ const App: React.FC = () => {
               {prevStep && (
                 <div className="mb-6 animate-in fade-in slide-in-from-top-4 duration-500">
                   <div className="bg-blue-50/50 rounded-2xl p-4 border border-blue-100 relative">
-                    <p className="text-[10px] font-black text-blue-400 uppercase mb-1">まえのステップの答え</p>
-                    <p className="text-sm font-black text-blue-700 leading-relaxed">{prevStep.solution}</p>
+                    <p className="text-[10px] font-black text-blue-400 uppercase mb-1">
+                      まえのステップのふりかえり
+                    </p>
+
+                    {/* 会話の説明（常時表示） */}
+                    <p className="text-sm font-black text-blue-700 leading-relaxed">
+                      {prevStep.solution}
+                    </p>
+
+                    {/* 途中計算（任意表示） */}
+                    {(() => {
+                      const calc = prevStep.calculation;
+                      const expr =
+                        typeof calc?.expression === "string" ? calc.expression.trim() : "";
+
+                      const hasValidCalc =
+                        !!calc &&
+                        expr !== "" &&
+                        expr.toUpperCase() !== "NULL" &&
+                        typeof calc.result === "number" &&
+                        !Number.isNaN(calc.result);
+
+                      if (!hasValidCalc) return null;
+
+                      return (
+                        <div className="mt-3">
+                          <button
+                            type="button"
+                            onClick={() => setShowPrevCalc(v => !v)}
+                            className="text-xs font-black text-blue-700 underline underline-offset-2 active:scale-95"
+                          >
+                            {showPrevCalc ? "計算をとじる" : "計算をみる"}
+                          </button>
+
+                          {showPrevCalc && (
+                            <div className="mt-2 bg-white/80 rounded-2xl p-3 border border-blue-100">
+                              <p className="text-[10px] font-black text-blue-400 uppercase mb-1">
+                                途中の計算
+                              </p>
+                              <p className="text-sm font-black text-blue-800">
+                                式 {calc.expression}
+                              </p>
+                              <p className="text-sm font-black text-blue-800 mt-1">
+                                結果 {calc.result}
+                                {calc.unit ? ` ${calc.unit}` : ""}
+                              </p>
+                              {calc.note && (
+                                <p className="text-xs font-black text-blue-600 mt-2">
+                                  {calc.note}
+                                </p>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      );
+                    })()}
+
                     <div className="absolute -bottom-3 left-1/2 -translate-x-1/2 bg-white rounded-full p-1 border border-gray-100 shadow-sm">
                       <ArrowDown size={14} className="text-blue-400" />
                     </div>
@@ -983,34 +1230,35 @@ const App: React.FC = () => {
                 </div>
               )}
 
-              {currentStepIndex === 0 && (
-                <div className="mb-4">
-                  <ThoughtBlockYellow
-                    title="スパッキーの考え方"
-                    text="まずは問題文に書かれている『わかっていること』と『知りたいこと』を分けてみよう。いまの数字は、どんな見方にそろえると比べやすいかな？"
-                  />
-                </div>
-              )}
 
               <div className="flex items-center justify-between mb-4">
                 <span className={`px-5 py-1 rounded-full text-sm font-black bg-blue-500 text-white shadow-sm shadow-blue-100`}>
-                  ステップ {currentStepIndex + 1}
+                  {isSpackyThinking ? "スパッキーの考え方" : `ステップ ${stepIndex + 1}`}
                 </span>
                 <AITeacher mood="SUPPORTIVE" className="scale-75 -mr-4" />
               </div>
 
               <div className="flex-1 flex flex-col justify-center items-center text-center">
-                <div className="bg-white p-6 rounded-[2rem] border-2 border-dashed border-blue-100 w-full min-h-[160px] flex flex-col items-center justify-center relative">
-                  <p className="text-xl font-black text-gray-800 leading-relaxed">
-                    {currentStep.hint}
-                  </p>
-                </div>
-                <div className="mt-4 flex items-center gap-2">
-                  <Heart className="text-red-400 fill-red-400" size={16} />
-                  <p className="text-xs text-gray-500 font-black">
-                    "だいじょうぶ、きみならできるよ！"
-                  </p>
-                </div>
+                {isSpackyThinking ? (
+                  <ThoughtBlockYellow
+                    title="スパッキーの考え方"
+                    text={thoughtText}
+                  />
+                ) : (
+                  <>
+                    <div className="bg-white p-6 rounded-[2rem] border-2 border-dashed border-blue-100 w-full min-h-[160px] flex flex-col items-center justify-center relative">
+                      <p className="text-xl font-black text-gray-800 leading-relaxed">
+                        {currentStep?.hint}
+                      </p>
+                    </div>
+                    <div className="mt-4 flex items-center gap-2">
+                      <Heart className="text-red-400 fill-red-400" size={16} />
+                      <p className="text-xs text-gray-500 font-black">
+                        "だいじょうぶ、きみならできるよ！"
+                      </p>
+                    </div>
+                  </>
+                )}
               </div>
 
               <div className="mt-8 flex gap-3">
@@ -1041,7 +1289,7 @@ const App: React.FC = () => {
           </div>
 
           <div className="flex justify-center gap-2 py-8">
-            {Array.from({ length: problem.steps.length + 1 }).map((_, idx) => (
+            {Array.from({ length: totalSteps + 1 }).map((_, idx) => (
               <div key={idx} className={`h-2.5 rounded-full transition-all ${idx === currentStepIndex ? 'w-10 bg-blue-500' : 'w-2.5 bg-gray-300'}`} />
             ))}
           </div>

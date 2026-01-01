@@ -1,0 +1,357 @@
+import type { AnalysisResult, MathProblem, MathStep } from "@/types";
+
+export type VerificationResult = {
+  ok: boolean;
+  issues: string[];
+};
+
+const isNonEmptyString = (value: unknown): value is string =>
+  typeof value === "string" && value.trim().length > 0;
+
+const hasRepeatingRun = (items: string[], minRun: number) => {
+  let run = 1;
+  for (let i = 1; i < items.length; i++) {
+    if (items[i] === items[i - 1]) {
+      run += 1;
+      if (run >= minRun) return true;
+    } else {
+      run = 1;
+    }
+  }
+  return false;
+};
+
+const normalizeForSimilarity = (text: string) =>
+  text
+    .replace(/[\s\u3000]+/g, "")
+    .replace(/[.,!?。、！？「」『』（）()]/g, "")
+    .toLowerCase();
+
+const bigrams = (text: string) => {
+  const grams = new Set<string>();
+  if (text.length < 2) return grams;
+  for (let i = 0; i < text.length - 1; i += 1) {
+    grams.add(text.slice(i, i + 2));
+  }
+  return grams;
+};
+
+const jaccard = (a: Set<string>, b: Set<string>) => {
+  if (a.size === 0 && b.size === 0) return 1;
+  let intersection = 0;
+  for (const item of a) {
+    if (b.has(item)) intersection += 1;
+  }
+  const union = a.size + b.size - intersection;
+  return union === 0 ? 0 : intersection / union;
+};
+
+const hasHighSimilarity = (a: string, b: string, threshold = 0.82) => {
+  const na = normalizeForSimilarity(a);
+  const nb = normalizeForSimilarity(b);
+  if (na.length < 4 || nb.length < 4) return false;
+  return jaccard(bigrams(na), bigrams(nb)) >= threshold;
+};
+
+const checkKeywordsCore = ["まとめ", "確認", "ふり返", "振り返"];
+const checkKeywordsSoft = ["見くらべ", "比べ", "ならべ", "意味", "整理", "単位", "言葉で"];
+const checkKeywordsSupport = ["確かめ", "確認", "見てみ", "言葉で", "単位"];
+
+export function needsJudgementStep(problemText: string, tags?: string[]): boolean {
+  const tagSet = new Set((tags ?? []).map((tag) => tag.toLowerCase()));
+  const tagNeeds =
+    tagSet.has("unit_rate") ||
+    tagSet.has("ratio") ||
+    tagSet.has("table") ||
+    tagSet.has("graph") ||
+    tagSet.has("comparison");
+
+  if (tagNeeds) return true;
+
+  const keywords = [
+    "どちら",
+    "いちばん",
+    "同じ",
+    "比べ",
+    "くらべ",
+    "安い",
+    "高い",
+    "多い",
+    "少ない",
+    "混んで",
+  ];
+  return keywords.some((kw) => problemText.includes(kw));
+}
+
+const hasFinalCheckStep = (steps: MathStep[]): boolean => {
+  if (!Array.isArray(steps) || steps.length === 0) return false;
+
+  const lastIndex = steps.length - 1;
+  const lastStep = steps[lastIndex];
+  if (!lastStep) return false;
+  if (lastStep?.calculation) return false;
+
+  const text = `${lastStep.hint ?? ""} ${lastStep.solution ?? ""}`;
+  const hasCore = checkKeywordsCore.some((kw) => text.includes(kw));
+  if (hasCore) return true;
+  const hasSoft = checkKeywordsSoft.some((kw) => text.includes(kw));
+  const hasSupport = checkKeywordsSupport.some((kw) => text.includes(kw));
+  return hasSoft && hasSupport;
+};
+
+
+export function ensureFinalCheckStep(steps: MathStep[]): boolean {
+  if (!Array.isArray(steps) || steps.length === 0) return false;
+  if (hasFinalCheckStep(steps)) return false;
+
+  const maxOrder = steps.reduce((max, step) => {
+    const order = typeof step?.order === "number" ? step.order : 0;
+    return Math.max(max, order);
+  }, 0);
+
+  steps.push({
+    order: maxOrder + 1,
+    hint: "出てきた数が『1つ分あたり』を表しているか、単位もいっしょに言葉で確認してみよう。",
+    solution: "この数は、同じ1つ分にそろえて考えるための数字だね。最後の言い方にできそうかな？",
+  });
+  return true;
+}
+
+const normalizeAfterRemoval = (text: string) =>
+  text
+    .replace(/[ 　]+/g, " ")
+    .replace(/\s+([。！？!?])/g, "$1")
+    .replace(/^[\s、。:：]+/g, "")
+    .replace(/[\s、。:：]+$/g, "")
+    .trim();
+
+const isTooShort = (text: string) => {
+  const stripped = text.replace(/[ 　。、:：!?！？]/g, "");
+  return stripped.length < 4;
+};
+
+export function sanitizeAnswerLeakInSteps(steps: MathStep[]): boolean {
+  if (!Array.isArray(steps) || steps.length === 0) return false;
+  const leakPatterns = [/答え\s*[:：]?/g, /答えは/g, /正解\s*[:：]?/g, /正解は/g];
+  let changed = false;
+
+  steps.forEach((step) => {
+    const updateText = (text: string, fallback: string) => {
+      let next = text;
+      for (const pattern of leakPatterns) {
+        next = next.replace(pattern, "");
+      }
+      next = normalizeAfterRemoval(next);
+      if (next !== text) {
+        changed = true;
+      }
+      if (!next || isTooShort(next)) {
+        changed = true;
+        return fallback;
+      }
+      return next;
+    };
+
+    if (typeof step?.hint === "string") {
+      step.hint = updateText(
+        step.hint,
+        "いま分かったことを使って、最後にまとめる準備をしよう。"
+      );
+    }
+    if (typeof step?.solution === "string") {
+      step.solution = updateText(
+        step.solution,
+        "求めた数が何を表すかを言葉で言えると、書きやすくなるよ。"
+      );
+    }
+  });
+
+  return changed;
+}
+
+export function verifySteps(
+  steps: MathStep[],
+  options?: {
+    ignoreDuplicateSimilarity?: boolean;
+    skipFinalStepCheck?: boolean;
+    needsJudgement?: boolean;
+  }
+): VerificationResult {
+  const issues: string[] = [];
+  if (!Array.isArray(steps) || steps.length === 0) {
+    return { ok: false, issues: ["steps_empty"] };
+  }
+
+  const hints: string[] = [];
+  const solutions: string[] = [];
+  let calculationCount = 0;
+
+  steps.forEach((step, index) => {
+    if (typeof step?.order !== "number") {
+      issues.push(`step_${index}_order_missing`);
+    }
+    if (!isNonEmptyString(step?.hint)) {
+      issues.push(`step_${index}_hint_missing`);
+    } else {
+      hints.push(step.hint.trim());
+    }
+    if (!isNonEmptyString(step?.solution)) {
+      issues.push(`step_${index}_solution_missing`);
+    } else {
+      solutions.push(step.solution.trim());
+    }
+
+    if (step?.calculation) {
+      calculationCount += 1;
+      if (!isNonEmptyString(step.calculation.expression)) {
+        issues.push(`step_${index}_calc_expression_missing`);
+      }
+    }
+  });
+
+  if (hints.length > 0 && hasRepeatingRun(hints, 3)) {
+    issues.push("repetition_hint");
+  }
+  if (solutions.length > 0 && hasRepeatingRun(solutions, 3)) {
+    issues.push("repetition_solution");
+  }
+  for (let i = 1; i < hints.length; i += 1) {
+    const isFinalPair = i === hints.length - 1;
+    if (isFinalPair) {
+      continue;
+    }
+    if (hasHighSimilarity(hints[i - 1], hints[i]) || hasHighSimilarity(solutions[i - 1], solutions[i])) {
+      issues.push("duplicate_step_similarity");
+      break;
+    }
+  }
+  if (steps.length >= 2) {
+    const expressionSet = new Set<string>();
+    let repeatedExpression = false;
+    for (const step of steps) {
+      const expr = step?.calculation?.expression;
+      if (typeof expr !== "string" || expr.trim() === "") continue;
+      const normalizedExpr = expr.replace(/\s+/g, "");
+      if (expressionSet.has(normalizedExpr)) {
+        repeatedExpression = true;
+        break;
+      }
+      expressionSet.add(normalizedExpr);
+    }
+    if (repeatedExpression) {
+      issues.push("duplicate_step_expression");
+    }
+  }
+  const answerLeakKeywords = ["答え", "正解"];
+  const hasAnswerLeak = steps.some(
+    (step) =>
+      answerLeakKeywords.some((kw) => (step?.hint ?? "").includes(kw)) ||
+      answerLeakKeywords.some((kw) => (step?.solution ?? "").includes(kw))
+  );
+  if (hasAnswerLeak) {
+    issues.push("answer_leak_in_steps");
+  }
+
+  // comparison/assertion based leak detection removed by design
+
+  if (!options?.skipFinalStepCheck) {
+    if (steps.length >= 2 && calculationCount >= 2 && !hasFinalCheckStep(steps)) {
+      issues.push("missing_final_summary_step");
+    }
+    const finalStep = steps[steps.length - 1];
+    if (finalStep?.calculation) {
+      issues.push("missing_final_check_step");
+    }
+    const finalText = `${finalStep?.hint ?? ""} ${finalStep?.solution ?? ""}`.trim();
+    const hasCheckKeyword = hasFinalCheckStep(steps);
+    if (!hasCheckKeyword) {
+      issues.push("missing_final_check_step");
+    }
+    const answerKeywords = ["答え", "だから", "よって"];
+    const hasPrematureAnswer = answerKeywords.some((kw) => (finalStep?.solution ?? "").includes(kw));
+    if (hasPrematureAnswer) {
+      issues.push("premature_final_answer");
+    }
+
+    const judgementKeywords = [
+      "くらべ",
+      "比べ",
+      "どちら",
+      "大きい",
+      "小さい",
+      "多い",
+      "少ない",
+      "いちばん",
+      "同じ",
+      "決める",
+      "判断",
+      "見くらべ",
+    ];
+    const needsJudgement = options?.needsJudgement ?? calculationCount >= 2;
+    const hasJudgementKeyword = judgementKeywords.some((kw) => finalText.includes(kw));
+    if (needsJudgement && !hasJudgementKeyword) {
+      issues.push("missing_judgement_step");
+    }
+  }
+
+  const filteredIssues =
+    options?.ignoreDuplicateSimilarity
+      ? issues.filter((issue) => issue !== "duplicate_step_similarity")
+      : issues;
+
+  return { ok: filteredIssues.length === 0, issues: filteredIssues };
+}
+
+export function verifyProblems(problems: MathProblem[]): VerificationResult {
+  const issues: string[] = [];
+  if (!Array.isArray(problems) || problems.length === 0) {
+    return { ok: false, issues: ["problems_empty"] };
+  }
+
+  problems.forEach((problem, index) => {
+    if (!isNonEmptyString(problem?.id)) {
+      issues.push(`problem_${index}_id_missing`);
+    }
+    if (!isNonEmptyString(problem?.problem_text)) {
+      issues.push(`problem_${index}_text_missing`);
+    }
+    if (!isNonEmptyString(problem?.final_answer)) {
+      issues.push(`problem_${index}_final_answer_missing`);
+    }
+    if (!isNonEmptyString(problem?.spacky_thinking)) {
+      issues.push(`problem_${index}_spacky_thinking_missing`);
+    }
+    const stepCheck = verifySteps(problem?.steps ?? []);
+    if (!stepCheck.ok) {
+      issues.push(...stepCheck.issues.map((issue) => `problem_${index}_${issue}`));
+    }
+  });
+
+  return { ok: issues.length === 0, issues };
+}
+
+export function verifyAnalysis(result: AnalysisResult): VerificationResult {
+  const issues: string[] = [];
+  if (!result || result.status !== "success") {
+    issues.push("status_not_success");
+  }
+
+  const problemsCheck = verifyProblems(result?.problems ?? []);
+  if (!problemsCheck.ok) {
+    issues.push(...problemsCheck.issues);
+  }
+
+  return { ok: issues.length === 0, issues };
+}
+
+export function normalizeStepOrders(steps: MathStep[], startOrder = 1) {
+  let order = startOrder;
+  steps.forEach((step) => {
+    step.order = order;
+    order += 1;
+  });
+}
+
+export function createProblemId(): string {
+  return `problem_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
