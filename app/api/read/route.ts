@@ -8,7 +8,7 @@ const DEFAULT_ERROR_MESSAGE =
 const provider = getAIProvider();
 
 export async function POST(req: Request) {
-  let payload: { imageBase64?: string };
+  let payload: { imageBase64?: string; debug?: boolean };
   try {
     payload = await req.json();
   } catch (error) {
@@ -16,7 +16,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: DEFAULT_ERROR_MESSAGE }, { status: 400 });
   }
 
-  const { imageBase64 } = payload;
+  const { imageBase64, debug } = payload;
   if (!imageBase64) {
     return NextResponse.json({ error: DEFAULT_ERROR_MESSAGE }, { status: 400 });
   }
@@ -27,8 +27,18 @@ export async function POST(req: Request) {
     const result: ReadResult = {
       status: "success",
       problems,
-      _debug: { provider: provider.name, phase: "read" },
     };
+
+    if (debug) {
+      const existingDebug =
+        result && typeof result._debug === "object" && result._debug !== null ? result._debug : {};
+      result._debug = {
+        ...existingDebug,
+        provider: provider.name,
+        phase: "read",
+        route: "/api/read",
+      } as any;
+    }
 
     return NextResponse.json(result);
   } catch (error) {

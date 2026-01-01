@@ -5,6 +5,7 @@ import { NextResponse } from "next/server";
 import { getAIProvider } from "@/lib/aiProviders/provider";
 import { estimateLevel, type Difficulty, type LevelMeta } from "@/lib/levelEstimator";
 import { computeExpression } from "@/lib/math/computeExpression";
+import { validateCalculations } from "@/lib/routing/qualityGate";
 import type { AnalysisResult } from "@/types";
 
 const DEFAULT_ERROR_MESSAGE =
@@ -19,7 +20,13 @@ const applyCalculationOverrides = (result: AnalysisResult) => {
     for (const step of problem.steps) {
       const calc = step?.calculation;
       if (!calc || typeof calc.expression !== "string") continue;
-      const computed = computeExpression(calc.expression);
+      const expr = calc.expression.trim();
+      if (expr.includes("最小公倍数") || expr.includes("最大公約数")) continue;
+      if (!/^[0-9+\-×÷().\s]+$/.test(expr)) {
+        delete step.calculation;
+        continue;
+      }
+      const computed = computeExpression(expr);
       if (typeof computed === "number") {
         calc.result = computed;
       } else {
@@ -52,9 +59,87 @@ export async function POST(req: Request) {
   try {
     const resolvedMeta = meta ?? estimateLevel(problem_text);
     const resolvedDifficulty = (meta?.difficulty ?? difficulty ?? resolvedMeta.difficulty) as Difficulty;
-    const finalResult: any = await provider.analyzeFromText(problem_text, resolvedDifficulty, resolvedMeta, {
-      debug,
-    });
+    let finalResult: AnalysisResult | undefined;
+    let finalGateReason: string | undefined;
+    const gateAttempts: Array<{ attempt: number; ok: boolean; reason?: string }> = [];
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const candidate = await provider.analyzeFromText(problem_text, resolvedDifficulty, resolvedMeta, {
+        debug,
+      });
+      if (!candidate) {
+        const reason = "no_candidate";
+        gateAttempts.push({ attempt, ok: false, reason });
+        finalGateReason = reason;
+        if (debug) {
+          console.log(
+            `[${provider.name}] solve gate check attempt=${attempt} ok=false reason=${reason}`,
+            []
+          );
+        }
+        continue;
+      }
+      if (!Array.isArray(candidate.problems) || candidate.problems.length === 0) {
+        const reason = "no_problems";
+        gateAttempts.push({ attempt, ok: false, reason });
+        finalGateReason = reason;
+        if (debug) {
+          console.log(
+            `[${provider.name}] solve gate check attempt=${attempt} ok=false reason=${reason}`,
+            []
+          );
+        }
+        continue;
+      }
+      const validation = validateCalculations(candidate.problems);
+      const reason = validation.ok
+        ? undefined
+        : "reason" in validation
+          ? validation.reason
+          : "unknown_reason";
+      gateAttempts.push({ attempt, ok: validation.ok, ...(reason ? { reason } : {}) });
+      if (debug) {
+        const calcList =
+          candidate.problems.flatMap((problem) =>
+            Array.isArray(problem?.steps)
+              ? problem.steps
+                .map((step) => step?.calculation)
+                .filter((calc) => calc && typeof calc.expression === "string")
+                .map((calc) => ({
+                  expression: calc!.expression,
+                  result: calc!.result,
+                }))
+              : []
+          ) ?? [];
+        console.log(
+          `[${provider.name}] solve gate check attempt=${attempt} ok=${validation.ok} reason=${reason ?? "n/a"}`,
+          calcList
+        );
+      }
+      if (!validation.ok) {
+        finalGateReason = reason ?? "unknown_reason";
+        continue;
+      }
+      finalGateReason = undefined;
+      finalResult = candidate;
+      break;
+    }
+    if (!finalResult) {
+      if (!debug) {
+        return NextResponse.json({ error: DEFAULT_ERROR_MESSAGE }, { status: 400 });
+      }
+      return NextResponse.json(
+        {
+          error: DEFAULT_ERROR_MESSAGE,
+          _debug: {
+            provider: provider.name,
+            route: "/api/solve",
+            gate: { ok: false, reason: finalGateReason ?? "unknown_reason" },
+            gateAttempts,
+          },
+        } as any,
+        { status: 400 }
+      );
+    }
 
     const existingMeta = finalResult.meta ?? {};
     const mergedMeta = { ...resolvedMeta, ...existingMeta };
@@ -68,11 +153,19 @@ export async function POST(req: Request) {
 
     if (debug) {
       const existingDebug =
-        finalResult && typeof finalResult._debug === "object" && finalResult._debug !== null
-          ? finalResult._debug
+        finalResult && typeof (finalResult as any)._debug === "object" && (finalResult as any)._debug !== null
+          ? (finalResult as any)._debug
           : {};
-      finalResult._debug = { ...existingDebug, provider: provider.name };
-    } else {
+
+      (finalResult as any)._debug = {
+        ...existingDebug,
+        provider: provider.name,
+        route: "/api/solve",
+        gate: finalGateReason ? { ok: false, reason: finalGateReason } : { ok: true },
+        gateAttempts,
+      };
+    }
+    else {
       if (finalResult?._debug) {
         delete finalResult._debug;
       }
