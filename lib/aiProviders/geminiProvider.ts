@@ -25,7 +25,7 @@ const GEMINI_COMPLEX_MODEL =
 const GEMINI_ROUTER_MODEL = process.env.GEMINI_ROUTER_MODEL || "gemini-2.5-flash";
 const GEMINI_PRO_MODEL = process.env.GEMINI_PRO_MODEL || GEMINI_COMPLEX_MODEL;
 const GEMINI_MAX_OUTPUT_TOKENS = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS ?? "0") || undefined;
-const TIMEOUT_FULL_MS = 30_000;
+const TIMEOUT_FULL_MS = 45_000;
 
 // ルーティング用の超小さいスキーマ
 const ROUTE_SCHEMA = {
@@ -186,6 +186,9 @@ export class GeminiProvider implements AIProvider {
     model?: string;
     timeoutMs?: number;
     maxOutputTokens?: number;
+    temperature?: number;
+    topP?: number;
+    candidateCount?: number;
   }): Promise<T> {
     this.ensureKey();
 
@@ -200,6 +203,11 @@ export class GeminiProvider implements AIProvider {
             responseMimeType: "application/json",
             responseSchema: args.schema,
             ...(maxTokens ? { maxOutputTokens: maxTokens } : {}),
+            ...(typeof args.temperature === "number" ? { temperature: args.temperature } : {}),
+            ...(typeof args.topP === "number" ? { topP: args.topP } : {}),
+            ...(typeof args.candidateCount === "number"
+              ? { candidateCount: args.candidateCount }
+              : {}),
           },
           signal,
         };
@@ -319,39 +327,82 @@ export class GeminiProvider implements AIProvider {
       args.difficulty === "hard" || isGeometry ? GEMINI_COMPLEX_MODEL : GEMINI_SIMPLE_MODEL;
 
     const prompt = createAnalysisPrompt(args.problemText, args.promptAppend);
+    const fastAppend =
+      "短く、冗長を避ける。stepsは必要最小限。solutionは2文以内厳守。計算式は必ず×÷を使い、* / は使わない。";
 
     const isJsonError = (error: unknown) => {
       const message = (error as Error)?.message ?? "";
       return message.includes("JSON");
     };
 
-    for (let attempt = 0; attempt < 2; attempt += 1) {
+    const runSingleShot = async () => {
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          const result = await this.generateContent<AnalysisResult>({
+            contents: [{ text: prompt }],
+            schema: ANALYSIS_RESPONSE_SCHEMA,
+            context: "solve_single_shot",
+            model,
+            timeoutMs: TIMEOUT_FULL_MS,
+            maxOutputTokens:
+              attempt === 0
+                ? maxOutputTokens
+                : Math.max(maxOutputTokens + 600, Math.round(maxOutputTokens * 1.5)),
+          });
+          debugInfo.pipelinePath = "single_shot";
+          debugInfo.modelFinal = model;
+          debugInfo.totalMs = Date.now() - totalStart;
+          result._debug = { ...(result._debug ?? {}), ...debugInfo };
+          return result;
+        } catch (error) {
+          if (this.isTimeoutAbort(error)) {
+            throw error;
+          }
+          if (attempt == 0 && isJsonError(error)) {
+            continue;
+          }
+          throw error;
+        }
+      }
+      throw new Error("AIの出力が途中で崩れました。もう一度試してね。");
+    };
+
+    try {
+      return await runSingleShot();
+    } catch (error) {
+      if (!this.isTimeoutAbort(error)) {
+        throw error;
+      }
+      console.warn(`[${this.name}] solve_single_shot timeout -> retry with fast config`);
+      const fastPrompt = createAnalysisPrompt(
+        args.problemText,
+        [args.promptAppend, fastAppend].filter(Boolean).join("\n")
+      );
       try {
         const result = await this.generateContent<AnalysisResult>({
-          contents: [{ text: prompt }],
+          contents: [{ text: fastPrompt }],
           schema: ANALYSIS_RESPONSE_SCHEMA,
-          context: "solve_single_shot",
+          context: "solve_single_shot_fast_retry",
           model,
           timeoutMs: TIMEOUT_FULL_MS,
-          maxOutputTokens: attempt === 0 ? maxOutputTokens : Math.max(maxOutputTokens + 600, Math.round(maxOutputTokens * 1.5)),
+          maxOutputTokens: 1200,
+          temperature: 0.2,
+          topP: 0.8,
+          candidateCount: 1,
         });
-        debugInfo.pipelinePath = "single_shot";
+        debugInfo.pipelinePath = "single_shot_fast_retry";
         debugInfo.modelFinal = model;
         debugInfo.totalMs = Date.now() - totalStart;
         result._debug = { ...(result._debug ?? {}), ...debugInfo };
         return result;
-      } catch (error) {
-        if (this.isTimeoutAbort(error)) {
-          throw error;
+      } catch (retryError) {
+        if (this.isTimeoutAbort(retryError)) {
+          throw retryError;
         }
-        if (attempt == 0 && isJsonError(error)) {
-          continue;
-        }
-        throw error;
+        throw retryError;
       }
     }
 
-    throw new Error("AIの出力が途中で崩れました。もう一度試してね。");
   }
 
   async analyzeFromText(

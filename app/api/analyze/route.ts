@@ -15,6 +15,21 @@ const DEFAULT_ERROR_MESSAGE =
 
 const provider = getAIProvider();
 
+const normalizeCalcExpression = (expression: string) =>
+  expression.trim().replace(/\*/g, "×").replace(/\//g, "÷").replace(/\s+/g, " ");
+
+const normalizeCalculationExpressions = (result: AnalysisResult | undefined) => {
+  if (!result || !Array.isArray(result.problems)) return;
+  for (const problem of result.problems) {
+    if (!problem || !Array.isArray(problem.steps)) continue;
+    for (const step of problem.steps) {
+      const calc = step?.calculation;
+      if (!calc || typeof calc.expression !== "string") continue;
+      calc.expression = normalizeCalcExpression(calc.expression);
+    }
+  }
+};
+
 const applyCalculationOverrides = (result: AnalysisResult) => {
   if (!result || !Array.isArray(result.problems)) return;
   for (const problem of result.problems) {
@@ -29,6 +44,15 @@ const applyCalculationOverrides = (result: AnalysisResult) => {
       if (typeof computed === "number") {
         calc.result = computed;
       }
+    }
+  }
+};
+
+const removeMethodHints = (result: AnalysisResult) => {
+  if (!result || !Array.isArray(result.problems)) return;
+  for (const problem of result.problems) {
+    if (problem && "method_hint" in problem) {
+      delete (problem as any).method_hint;
     }
   }
 };
@@ -75,6 +99,7 @@ export async function POST(req: Request) {
         { debug, promptAppend: attempt === 1 ? retryPromptAppend : undefined }
       );
 
+      normalizeCalculationExpressions(candidate as AnalysisResult);
       const validation = validateCalculations(candidate?.problems);
       if (debug) {
         const calcList =
@@ -121,6 +146,7 @@ export async function POST(req: Request) {
     finalResult.meta = mergedMeta;
 
     applyCalculationOverrides(finalResult as AnalysisResult);
+    removeMethodHints(finalResult as AnalysisResult);
 
     // debug=true のときだけ provider名を付与（型を壊さず最低限）
     if (debug) {

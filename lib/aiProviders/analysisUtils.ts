@@ -318,9 +318,6 @@ export function verifyProblems(problems: MathProblem[]): VerificationResult {
     if (!isNonEmptyString(problem?.final_answer)) {
       issues.push(`problem_${index}_final_answer_missing`);
     }
-    if (!problem?.method_hint || !isNonEmptyString(problem.method_hint.label) || !isNonEmptyString(problem.method_hint.pitch)) {
-      issues.push(`problem_${index}_method_hint_missing`);
-    }
     const stepCheck = verifySteps(problem?.steps ?? []);
     if (!stepCheck.ok) {
       issues.push(...stepCheck.issues.map((issue) => `problem_${index}_${issue}`));
