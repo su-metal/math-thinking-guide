@@ -307,11 +307,11 @@ const LimitReachedModal = ({ onConfirm, onCancel }: { onConfirm: () => void, onC
       <div className="w-20 h-20 bg-orange-50 rounded-full flex items-center justify-center mb-6">
         <AlertCircle className="w-10 h-10 text-orange-500" />
       </div>
-      <h2 className="text-2xl font-bold text-gray-800 mb-4">今日のぶんはおしまい！</h2>
+      <h2 className="text-2xl font-bold text-gray-800 mb-4">チケットがなくなったよ！</h2>
       <p className="text-gray-500 mb-8 leading-relaxed">
-        無料プランでは1日に3回まで<br />
-        問題を解くことができるよ。<br />
-        <span className="font-bold text-blue-500">Proプラン</span>なら、ずっと使い放題！
+        今週の無料チケット（3枚）を使い切ったよ。<br />
+        <span className="font-bold text-blue-500">Proプラン</span>なら、チケットなしで<br />
+        高品質なAIガイドが使い放題！
       </p>
       <div className="w-full space-y-3">
         <button
@@ -575,15 +575,35 @@ const App: React.FC = () => {
     const historyFromStorage = loadHistory();
     setHistory(historyFromStorage);
 
-    const lastReset = localStorage.getItem('last_reset_date');
-    const today = new Date().toLocaleDateString();
-    if (lastReset !== today) {
-      localStorage.setItem('last_reset_date', today);
-      localStorage.setItem('remaining_tries', '3');
+    // クレジット（チケット）残数の初期化
+    const savedCredits = localStorage.getItem('user_credits');
+    const lastResetTime = localStorage.getItem('last_weekly_reset_time');
+    const now = Date.now();
+    const ONE_WEEK = 7 * 24 * 60 * 60 * 1000;
+
+    if (!lastResetTime) {
+      // 初回起動時: チケット3枚付与 & 現在時刻を保存
+      localStorage.setItem('user_credits', '3');
+      localStorage.setItem('last_weekly_reset_time', now.toString());
       setRemainingTries(3);
     } else {
-      const tries = localStorage.getItem('remaining_tries');
-      if (tries) setRemainingTries(parseInt(tries));
+      const elapsed = now - parseInt(lastResetTime);
+      if (elapsed >= ONE_WEEK) {
+        // 1週間以上経過: チケットを3枚に回復
+        localStorage.setItem('user_credits', '3');
+        localStorage.setItem('last_weekly_reset_time', now.toString());
+        setRemainingTries(3);
+      } else if (savedCredits !== null) {
+        setRemainingTries(parseInt(savedCredits));
+      } else {
+        setRemainingTries(0);
+      }
+    }
+
+    // Pro状態の読み込み
+    const savedPro = localStorage.getItem('is_pro');
+    if (savedPro === 'true') {
+      setIsPro(true);
     }
 
     return () => clearTimeout(timer);
@@ -605,13 +625,7 @@ const App: React.FC = () => {
     });
   };
 
-  const decreaseTries = () => {
-    if (!isPro) {
-      const newTries = Math.max(0, remainingTries - 1);
-      setRemainingTries(newTries);
-      localStorage.setItem('remaining_tries', newTries.toString());
-    }
-  };
+  // Removed decreaseTries function as credit consumption is now handled directly in selectProblem
 
   const navigateToOnboarding = () => {
     setPrevScreen(currentScreen);
@@ -700,7 +714,7 @@ const App: React.FC = () => {
         solveAbortRef.current = solveController;
 
         try {
-          const result = await solveMathProblem(selected.problem_text, undefined, solveController.signal);
+          const result = await solveMathProblem(selected.problem_text, analysisResult?.meta, isPro, solveAbortRef.current.signal);
 
           console.log("---------- [SPACKY AI SOLUTION START] ----------");
           console.log(JSON.stringify(result, null, 2));
@@ -721,7 +735,13 @@ const App: React.FC = () => {
           };
           console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
           appendHistoryItem(historyItem);
-          decreaseTries();
+
+          // クレジットの消費（成功時のみ）
+          if (!isPro) {
+            const nextCredits = Math.max(0, remainingTries - 1);
+            setRemainingTries(nextCredits);
+            localStorage.setItem('user_credits', nextCredits.toString());
+          }
         } catch (err: any) {
           if (isAbortError(err)) {
             return;
@@ -779,6 +799,16 @@ const App: React.FC = () => {
           {/* watermark */}
           <div className="absolute top-3 right-4 opacity-15 text-amber-500">
             <Lightbulb className="w-16 h-16" />
+          </div>
+          {/* チケット残数カウンター */}
+          <div className="flex justify-between items-center mb-6">
+            <div className="flex items-center gap-2 px-4 py-2 bg-blue-50 rounded-2xl border border-blue-100">
+              <Sparkles className="text-blue-500" size={18} />
+              <span className="text-sm font-bold text-blue-700">今週のチケット</span>
+              <span className="px-2 py-0.5 bg-blue-500 text-white rounded-lg text-xs font-black">
+                のこり {remainingTries}枚
+              </span>
+            </div>
           </div>
 
           <div className="flex items-center gap-3 mb-3">
@@ -847,10 +877,10 @@ const App: React.FC = () => {
 
             <div className="bg-white rounded-3xl p-6 shadow-sm border border-blue-50 flex items-center justify-between relative overflow-hidden">
               <div className="flex items-center gap-4">
-                <div className="bg-blue-100 p-3 rounded-2xl shrink-0"><Lightbulb className="text-blue-500" /></div>
+                <div className="bg-blue-100 p-3 rounded-2xl shrink-0"><Sparkles className="text-blue-500" /></div>
                 <div>
-                  <p className="text-[10px] text-gray-400 font-black uppercase tracking-wider">今日ののこり</p>
-                  <p className="text-lg font-black text-gray-800">{isPro ? "無制限だよ！" : `あと ${remainingTries} 回`}</p>
+                  <p className="text-[10px] text-gray-400 font-black uppercase tracking-wider">今週のチケット</p>
+                  <p className="text-lg font-black text-gray-800">{isPro ? "無制限だよ！" : `のこり ${remainingTries} 枚`}</p>
                 </div>
               </div>
               {!isPro && (
@@ -1237,21 +1267,21 @@ const App: React.FC = () => {
                 </div>
               </div>
 
-              {prevStep && (
-                <div className="mb-6 animate-in fade-in slide-in-from-top-4 duration-500">
+              {currentStep?.reflection && (
+                <div className="mb-6 animate-in fade-in slide-in-from-top-4 duration-500 text-left">
                   <div className="bg-blue-50/50 rounded-2xl p-4 border border-blue-100 relative">
                     <p className="text-[10px] font-black text-blue-400 uppercase mb-1">
-                      まえのステップのふりかえり
+                      {prevStep ? "まえのステップのふりかえり" : "スパッキーのアドバイス"}
                     </p>
 
                     {/* 会話の説明（常時表示） */}
                     <p className="text-sm font-black text-blue-700 leading-relaxed">
-                      {prevStep.reflection || prevStep.solution}
+                      {currentStep.reflection}
                     </p>
 
-                    {/* 途中計算（任意表示） */}
+                    {/* 途中計算（任意表示：前のステップのもの） */}
                     {(() => {
-                      const calc = prevStep.calculation;
+                      const calc = prevStep?.calculation;
                       const expr =
                         typeof calc?.expression === "string" ? calc.expression.trim() : "";
 

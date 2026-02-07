@@ -30,12 +30,13 @@ export async function readMathProblem(
 export async function solveMathProblem(
   problem_text: string,
   meta?: AnalysisResult["meta"],
+  isPro?: boolean,
   signal?: AbortSignal
 ): Promise<AnalysisResult> {
   const response = await fetch("/api/solve", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ problem_text, meta, debug: true }),
+    body: JSON.stringify({ problem_text, meta, isPro, debug: true }),
     signal
   });
 

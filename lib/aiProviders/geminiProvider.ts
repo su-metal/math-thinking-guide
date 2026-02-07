@@ -1,4 +1,5 @@
 ﻿import { GoogleGenAI } from "@google/genai";
+import { LevelMeta, Difficulty } from "@/lib/levelEstimator";
 import { AnalysisResult, DrillResult, ExtractedProblem } from "../../types";
 import { AIProvider } from "./provider";
 import {
@@ -25,10 +26,9 @@ import { MathStep } from "../../types";
  * 環境変数があればそちらを優先
  */
 const GEMINI_SIMPLE_MODEL = process.env.GEMINI_SIMPLE_MODEL || "gemini-2.5-flash";
-const GEMINI_COMPLEX_MODEL =
-  process.env.GEMINI_COMPLEX_MODEL || "gemini-3-flash-preview";
+const GEMINI_COMPLEX_MODEL = process.env.GEMINI_COMPLEX_MODEL || "gemini-2.5-flash";
 const GEMINI_ROUTER_MODEL = process.env.GEMINI_ROUTER_MODEL || "gemini-2.5-flash";
-const GEMINI_PRO_MODEL = process.env.GEMINI_PRO_MODEL || GEMINI_COMPLEX_MODEL;
+const GEMINI_PRO_MODEL = process.env.GEMINI_PRO_MODEL || "gemini-3-flash-preview";
 const GEMINI_MAX_OUTPUT_TOKENS = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS ?? "0") || undefined;
 const TIMEOUT_SINGLE_SHOT_MS = 30_000;
 const TIMEOUT_OUTLINE_MS = 12_000;
@@ -589,6 +589,7 @@ export class GeminiProvider implements AIProvider {
     metaSignals?: Record<string, unknown>;
     debug?: boolean;
     promptAppend?: string;
+    isPro?: boolean;
   }): Promise<AnalysisResult> {
     this.ensureKey();
     const totalStart = Date.now();
@@ -608,8 +609,13 @@ export class GeminiProvider implements AIProvider {
             : 4096;
 
     const maxOutputTokens = GEMINI_MAX_OUTPUT_TOKENS ?? defaultMaxOutputTokens;
-    const model =
+    let model =
       args.difficulty === "hard" || isGeometry ? GEMINI_COMPLEX_MODEL : GEMINI_SIMPLE_MODEL;
+
+    // Pro フラグがある場合は最上位モデルで上書き
+    if (args.isPro) {
+      model = GEMINI_PRO_MODEL;
+    }
 
     const prompt = createAnalysisPrompt(args.problemText, args.promptAppend);
 
@@ -874,16 +880,17 @@ export class GeminiProvider implements AIProvider {
   async analyzeFromText(
     problemText: string,
     difficulty: "easy" | "normal" | "hard",
-    meta?: { tags?: string[]; signals?: Record<string, unknown> },
-    options?: { debug?: boolean; promptAppend?: string }
-  ) {
+    meta?: LevelMeta,
+    options?: { debug?: boolean; promptAppend?: string; isPro?: boolean }
+  ): Promise<AnalysisResult> {
     return this.analyzeFromTextInternal({
       problemText,
       difficulty,
       metaTags: meta?.tags,
-      metaSignals: (meta as any)?.signals,
+      metaSignals: meta?.signals,
       debug: options?.debug,
       promptAppend: options?.promptAppend,
+      isPro: options?.isPro,
     });
   }
 
@@ -891,8 +898,14 @@ export class GeminiProvider implements AIProvider {
     imageBase64: string;
     problemText: string;
     difficulty: "easy" | "normal" | "hard";
+    isPro?: boolean;
   }): Promise<AnalysisResult> {
-    return this.analyzeFromTextInternal(args);
+    return this.analyzeFromTextInternal({
+      problemText: args.problemText,
+      difficulty: args.difficulty,
+      imageBase64: args.imageBase64,
+      isPro: args.isPro,
+    });
   }
 
   async analyze(imageBase64: string): Promise<AnalysisResult> {
