@@ -53,17 +53,79 @@ const isAbortError = (error: unknown): boolean => {
   return name === 'AbortError';
 };
 
-const persistHistory = (items: HistoryItem[]): HistoryItem[] => {
+const STORAGE_KEY = 'math_history';
+const MAX_ITEMS = 3;
+const MAX_BYTES = 1_500_000;
+const MAX_TEXT_CHARS = 180;
+const FALLBACK_SPACKY = 'まず情報を整理して、同じ基準で比べられる形を考えてみよう。';
+
+const getByteSize = (value: string) => {
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(value).length;
+  }
+  return value.length;
+};
+
+const truncateText = (value: string | undefined, maxChars: number) => {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+};
+
+// HistoryItem shape (source):
+// { id, timestamp, image(base64), result:{ status, problems:[{problem_text, spacky_thinking, steps, final_answer}], meta, _debug } }
+const toStorable = (item: HistoryItem, fallbackId: string): HistoryItem => {
+  const problem = item?.result?.problems?.[0];
+  const storableProblem = {
+    id: problem?.id ?? 'p1',
+    problem_text: truncateText(problem?.problem_text, MAX_TEXT_CHARS),
+    spacky_thinking: truncateText(problem?.spacky_thinking, MAX_TEXT_CHARS) || FALLBACK_SPACKY,
+    steps: [],
+    final_answer: truncateText(problem?.final_answer, MAX_TEXT_CHARS),
+  };
+
+  return {
+    id: item?.id ?? fallbackId,
+    timestamp: typeof item?.timestamp === 'number' ? item.timestamp : Date.now(),
+    image: '',
+    result: {
+      status: item?.result?.status ?? 'success',
+      problems: [storableProblem],
+      meta: item?.result?.meta,
+    },
+  };
+};
+
+const needsMigration = (item: HistoryItem): boolean => {
+  if (typeof item?.image === 'string' && item.image.startsWith('data:')) return true;
+  if (item?.result?._debug) return true;
+  const problems = item?.result?.problems;
+  if (Array.isArray(problems) && problems.length > 1) return true;
+  if (Array.isArray(problems) && problems.some((p) => (p?.steps?.length ?? 0) > 0)) return true;
+  return false;
+};
+
+const trimToLimits = (items: HistoryItem[]) => {
+  let trimmed = items.slice(0, MAX_ITEMS);
+  while (trimmed.length > 0 && getByteSize(JSON.stringify(trimmed)) > MAX_BYTES) {
+    trimmed = trimmed.slice(0, trimmed.length - 1);
+  }
+  return trimmed;
+};
+
+const saveHistoryLocal = (items: HistoryItem[]): HistoryItem[] => {
   if (items.length === 0) {
-    localStorage.removeItem('math_history');
+    localStorage.removeItem(STORAGE_KEY);
     return [];
   }
 
-  const limits = [5, 3, 1];
+  const storable = items.map((item, index) => toStorable(item, `h_${Date.now()}_${index}`));
+  const limits = [MAX_ITEMS, 2, 1];
   for (const limit of limits) {
-    const candidate = items.slice(0, limit);
+    const candidate = trimToLimits(storable.slice(0, limit));
+    if (candidate.length === 0) continue;
     try {
-      localStorage.setItem('math_history', JSON.stringify(candidate));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(candidate));
       return candidate;
     } catch (error) {
       console.error(`Failed to persist math_history (limit ${limit})`, error);
@@ -73,21 +135,41 @@ const persistHistory = (items: HistoryItem[]): HistoryItem[] => {
     }
   }
 
-  localStorage.removeItem('math_history');
-  return items.slice(0, 1);
+  localStorage.removeItem(STORAGE_KEY);
+  return [];
 };
 
-const loadStoredHistory = (): HistoryItem[] => {
-  const raw = localStorage.getItem('math_history');
+const loadHistoryLocal = (): HistoryItem[] => {
+  const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    let migrated = false;
+    const normalized = parsed.map((item, index) => {
+      const typed = item as HistoryItem;
+      if (needsMigration(typed)) migrated = true;
+      return toStorable(typed, `h_${Date.now()}_${index}`);
+    });
+    if (migrated) {
+      return saveHistoryLocal(normalized);
+    }
+    return normalized;
   } catch (error) {
     console.error('Failed to parse saved math_history', error);
-    localStorage.removeItem('math_history');
+    localStorage.removeItem(STORAGE_KEY);
     return [];
   }
+};
+
+const saveHistory = (items: HistoryItem[]): HistoryItem[] => {
+  // TODO: swap to DB for Pro plan
+  return saveHistoryLocal(items);
+};
+
+const loadHistory = (): HistoryItem[] => {
+  // TODO: swap to DB for Pro plan
+  return loadHistoryLocal();
 };
 
 
@@ -489,7 +571,7 @@ const App: React.FC = () => {
       }
     }, 2000);
 
-    const historyFromStorage = loadStoredHistory();
+    const historyFromStorage = loadHistory();
     setHistory(historyFromStorage);
 
     const lastReset = localStorage.getItem('last_reset_date');
@@ -515,10 +597,10 @@ const App: React.FC = () => {
     }
   };
 
-  const saveHistory = (item: HistoryItem) => {
+  const appendHistoryItem = (item: HistoryItem) => {
     setHistory((prev) => {
       const combined = [item, ...prev];
-      return persistHistory(combined);
+      return saveHistory(combined);
     });
   };
 
@@ -612,7 +694,7 @@ const App: React.FC = () => {
         result: result
       };
       console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
-      saveHistory(historyItem);
+      appendHistoryItem(historyItem);
       decreaseTries();
     } catch (err: any) {
       if (isAbortError(err)) {
@@ -654,7 +736,7 @@ const App: React.FC = () => {
           result: result
         };
         console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
-        saveHistory(historyItem);
+        appendHistoryItem(historyItem);
         decreaseTries();
       } catch (err: any) {
         if (isAbortError(err)) {
@@ -1438,11 +1520,17 @@ const App: React.FC = () => {
               }}
               className="w-full bg-white p-4 rounded-3xl flex items-center gap-4 shadow-sm text-left"
             >
-              <img
-                src={item.image}
-                className="h-16 w-16 object-contain bg-gray-50 rounded-xl shrink-0"
-                alt="history"
-              />
+              {item.image ? (
+                <img
+                  src={item.image}
+                  className="h-16 w-16 object-contain bg-gray-50 rounded-xl shrink-0"
+                  alt="history"
+                />
+              ) : (
+                <div className="h-16 w-16 bg-gray-50 rounded-xl shrink-0 flex items-center justify-center text-gray-300">
+                  <ImageIcon size={20} />
+                </div>
+              )}
               <div className="flex-1 min-w-0">
                 <p className="text-[10px] text-gray-400">
                   {new Date(item.timestamp).toLocaleDateString('ja-JP')}
