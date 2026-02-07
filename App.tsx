@@ -989,7 +989,7 @@ const App: React.FC = () => {
             </p>
           </div>
 
-          <div className="w-full flex overflow-x-auto snap-x snap-mandatory scrollbar-hide gap-6 px-4 pb-8">
+          <div className={`w-full flex overflow-x-auto snap-x snap-mandatory scrollbar-hide gap-6 px-4 pb-8 ${selectableProblems.length === 1 ? 'justify-center' : ''}`}>
             {selectableProblems.map((p, idx) => (
               <div
                 key={p.id || idx}
@@ -1018,12 +1018,16 @@ const App: React.FC = () => {
             ))}
           </div>
 
-          <div className="flex gap-2">
-            {selectableProblems.map((_, idx) => (
-              <div key={idx} className={`w-2 h-2 rounded-full bg-blue-200`} />
-            ))}
-          </div>
-          <p className="mt-6 text-xs text-gray-400 font-black">横にスワイプしてえらんでね</p>
+          {selectableProblems.length > 1 && (
+            <>
+              <div className="flex gap-2">
+                {selectableProblems.map((_, idx) => (
+                  <div key={idx} className={`w-2 h-2 rounded-full bg-blue-200`} />
+                ))}
+              </div>
+              <p className="mt-6 text-xs text-gray-400 font-black">横にスワイプしてえらんでね</p>
+            </>
+          )}
         </main>
       </div>
     );
