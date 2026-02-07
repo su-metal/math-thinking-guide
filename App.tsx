@@ -93,6 +93,7 @@ const toStorable = (item: HistoryItem, fallbackId: string): HistoryItem => {
       problems: [storableProblem],
       meta: item?.result?.meta,
     },
+    allProblems: item.allProblems,
   };
 };
 
@@ -668,34 +669,7 @@ const App: React.FC = () => {
       setReadProblemText(extractedProblems[0]?.problem_text ?? null);
       setReadProblems(extractedProblems);
       setAnalysisPhase("read_done");
-
-      if (extractedProblems.length > 1) {
-        setCurrentScreen(AppScreen.PROBLEM_SELECT);
-        return;
-      }
-
-      const solveController = new AbortController();
-      solveAbortRef.current = solveController;
-      setAnalysisPhase("solving");
-      const result = await solveMathProblem(extractedProblems[0].problem_text, undefined, solveController.signal);
-      if (requestIdRef.current !== requestId) return;
-
-      console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
-      setAnalysisResult(result);
-      setCurrentProblemIndex(0);
-      setCurrentStepIndex(0);
-      setAnalysisPhase("done");
-      setCurrentScreen(AppScreen.RESULT);
-
-      const historyItem: HistoryItem = {
-        id: Date.now().toString(),
-        timestamp: Date.now(),
-        image: img,
-        result: result
-      };
-      console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
-      appendHistoryItem(historyItem);
-      decreaseTries();
+      setCurrentScreen(AppScreen.PROBLEM_SELECT);
     } catch (err: any) {
       if (isAbortError(err)) {
         return;
@@ -712,44 +686,56 @@ const App: React.FC = () => {
     const selected = selectableProblems[index];
     if (!selected) return;
 
-    if (!analysisResult && readProblems) {
-      setReadProblemText(selected.problem_text);
-      setAnalysisPhase("solving");
-      setCurrentScreen(AppScreen.LOADING);
+    // もし抽出された問題リストがある場合（スキャン直後や完了画面から戻った場合）
+    if (readProblems) {
+      const currentSolvedText = analysisResult?.problems?.[0]?.problem_text;
+      const needsSolve = !analysisResult || currentSolvedText !== selected.problem_text;
 
-      const solveController = new AbortController();
-      solveAbortRef.current = solveController;
+      if (needsSolve) {
+        setReadProblemText(selected.problem_text);
+        setAnalysisPhase("solving");
+        setCurrentScreen(AppScreen.LOADING);
 
-      try {
-        const result = await solveMathProblem(selected.problem_text, undefined, solveController.signal);
-        console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
-        setAnalysisResult(result);
-        setCurrentProblemIndex(0);
-        setCurrentStepIndex(0);
-        setAnalysisPhase("done");
-        setCurrentScreen(AppScreen.RESULT);
+        const solveController = new AbortController();
+        solveAbortRef.current = solveController;
 
-        const historyItem: HistoryItem = {
-          id: Date.now().toString(),
-          timestamp: Date.now(),
-          image: croppedImage ?? "",
-          result: result
-        };
-        console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
-        appendHistoryItem(historyItem);
-        decreaseTries();
-      } catch (err: any) {
-        if (isAbortError(err)) {
-          return;
+        try {
+          const result = await solveMathProblem(selected.problem_text, undefined, solveController.signal);
+          console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
+          setAnalysisResult(result);
+          setCurrentProblemIndex(0); // solveResultは常に1件
+          setCurrentStepIndex(0);
+          setAnalysisPhase("done");
+          setCurrentScreen(AppScreen.RESULT);
+
+          const historyItem: HistoryItem = {
+            id: Date.now().toString(),
+            timestamp: Date.now(),
+            image: croppedImage ?? "",
+            result: result,
+            allProblems: readProblems ?? []
+          };
+          console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
+          appendHistoryItem(historyItem);
+          decreaseTries();
+        } catch (err: any) {
+          if (isAbortError(err)) {
+            return;
+          }
+          setAnalysisPhase("error");
+          alert(err.message || "エラーがおきました。もういちど試してね。");
+          setCurrentScreen(AppScreen.HOME);
         }
-        setAnalysisPhase("error");
-        alert(err.message || "エラーがおきました。もういちど試してね。");
-        setCurrentScreen(AppScreen.HOME);
+        return;
+      } else {
+        // すでに解かれている問題ならそのまま表示
+        setCurrentProblemIndex(0);
       }
-      return;
+    } else {
+      // 履歴から直接開く場合など
+      setCurrentProblemIndex(index);
     }
 
-    setCurrentProblemIndex(index);
     setCurrentStepIndex(0);
     setShowFinalAnswer(false);
     setCurrentScreen(AppScreen.RESULT);
@@ -1173,14 +1159,12 @@ const App: React.FC = () => {
                       <Undo2 size={20} /> 解説にもどる
                     </button>
 
-                    {hasMultipleProblems && (
-                      <button
-                        onClick={() => setCurrentScreen(AppScreen.PROBLEM_SELECT)}
-                        className="w-full bg-white border-2 border-gray-100 text-gray-500 py-4 rounded-2xl font-black flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
-                      >
-                        <LayoutList size={20} /> 他の問題をえらぶ
-                      </button>
-                    )}
+                    <button
+                      onClick={() => setCurrentScreen(AppScreen.PROBLEM_SELECT)}
+                      className="w-full bg-blue-50 border-2 border-blue-200 text-blue-600 py-4 rounded-2xl font-black flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
+                    >
+                      <LayoutList size={20} /> 同じ写真のほかの問題を解く
+                    </button>
 
                     <button
                       onClick={() => setCurrentScreen(AppScreen.HOME)}
@@ -1510,10 +1494,11 @@ const App: React.FC = () => {
               onClick={() => {
                 setAnalysisResult(item.result);
                 setCroppedImage(item.image);
+                setReadProblems(item.allProblems ?? null);
                 setCurrentProblemIndex(0);
                 setCurrentStepIndex(0);
                 setCurrentScreen(
-                  item.result.problems.length > 1
+                  (item.allProblems?.length ?? 0) > 1
                     ? AppScreen.PROBLEM_SELECT
                     : AppScreen.RESULT
                 );

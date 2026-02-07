@@ -99,6 +99,7 @@ export interface HistoryItem {
   timestamp: number;
   image: string;
   result: AnalysisResult;
+  allProblems?: ExtractedProblem[];
 }
 
 export enum AppScreen {
