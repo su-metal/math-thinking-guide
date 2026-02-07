@@ -701,7 +701,11 @@ const App: React.FC = () => {
 
         try {
           const result = await solveMathProblem(selected.problem_text, undefined, solveController.signal);
-          console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
+
+          console.log("---------- [SPACKY AI SOLUTION START] ----------");
+          console.log(JSON.stringify(result, null, 2));
+          console.log("---------- [SPACKY AI SOLUTION END] ----------");
+
           setAnalysisResult(result);
           setCurrentProblemIndex(0); // solveResultは常に1件
           setCurrentStepIndex(0);
@@ -1238,7 +1242,7 @@ const App: React.FC = () => {
 
                     {/* 会話の説明（常時表示） */}
                     <p className="text-sm font-black text-blue-700 leading-relaxed">
-                      {prevStep.solution}
+                      {prevStep.reflection || prevStep.solution}
                     </p>
 
                     {/* 途中計算（任意表示） */}
@@ -1312,9 +1316,14 @@ const App: React.FC = () => {
                   />
                 ) : (
                   <>
-                    <div className="bg-white p-6 rounded-[2rem] border-2 border-dashed border-blue-100 w-full min-h-[160px] flex flex-col items-center justify-center relative">
+                    <div className="bg-white p-6 rounded-[2rem] border-2 border-dashed border-blue-100 w-full min-h-[160px] flex flex-col items-center justify-center relative space-y-4">
+                      {currentStep?.hint && (
+                        <p className="text-sm font-black text-blue-400 leading-relaxed">
+                          {currentStep.hint}
+                        </p>
+                      )}
                       <p className="text-xl font-black text-gray-800 leading-relaxed">
-                        {currentStep?.hint}
+                        {currentStep?.question || currentStep?.hint}
                       </p>
                     </div>
                     <div className="mt-4 flex items-center gap-2">
