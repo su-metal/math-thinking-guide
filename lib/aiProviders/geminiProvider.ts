@@ -1,4 +1,5 @@
 ﻿import { GoogleGenAI } from "@google/genai";
+import { LevelMeta, Difficulty } from "@/lib/levelEstimator";
 import { AnalysisResult, DrillResult, ExtractedProblem } from "../../types";
 import { AIProvider } from "./provider";
 import {
@@ -11,7 +12,10 @@ import {
   createAnalysisPrompt,
   createOutlinePrompt,
   createDrillPrompt,
+  createStepsChunkPrompt,
+  ANALYSIS_STEPS_CHUNK_SCHEMA,
 } from "./prompts";
+import { MathStep } from "../../types";
 
 /**
  * モデル切替ポリシー
@@ -22,10 +26,9 @@ import {
  * 環境変数があればそちらを優先
  */
 const GEMINI_SIMPLE_MODEL = process.env.GEMINI_SIMPLE_MODEL || "gemini-2.5-flash";
-const GEMINI_COMPLEX_MODEL =
-  process.env.GEMINI_COMPLEX_MODEL || "gemini-3-flash-preview";
+const GEMINI_COMPLEX_MODEL = process.env.GEMINI_COMPLEX_MODEL || "gemini-2.5-flash";
 const GEMINI_ROUTER_MODEL = process.env.GEMINI_ROUTER_MODEL || "gemini-2.5-flash";
-const GEMINI_PRO_MODEL = process.env.GEMINI_PRO_MODEL || GEMINI_COMPLEX_MODEL;
+const GEMINI_PRO_MODEL = process.env.GEMINI_PRO_MODEL || "gemini-3-flash-preview";
 const GEMINI_MAX_OUTPUT_TOKENS = Number(process.env.GEMINI_MAX_OUTPUT_TOKENS ?? "0") || undefined;
 const TIMEOUT_SINGLE_SHOT_MS = 30_000;
 const TIMEOUT_OUTLINE_MS = 12_000;
@@ -88,7 +91,7 @@ complex の目安
 export class GeminiProvider implements AIProvider {
   readonly name = "gemini";
 
-  constructor(private apiKey?: string) {}
+  constructor(private apiKey?: string) { }
 
   private ensureKey() {
     if (!this.apiKey) {
@@ -99,16 +102,55 @@ export class GeminiProvider implements AIProvider {
   private parseJson<T>(raw: string, context: string): T {
     const start = raw.indexOf("{");
     const end = raw.lastIndexOf("}");
-    if (start === -1 || end === -1 || end <= start) {
+    if (start === -1) {
       console.error(`[${this.name}] Non-JSON ${context}:`, raw.slice(0, 300));
       console.error(`[${this.name}] Non-JSON ${context} tail:`, raw.slice(-300));
       throw new Error("AIの出力がJSON形式になりませんでした。もう一度試してね。");
     }
 
-    const candidate = raw.slice(start, end + 1);
+    let candidate = "";
+    if (start === 0 && end === -1) {
+      candidate = raw;
+    } else if (end === -1 || end <= start) {
+      // 閉じ括弧がない場合は補完を試みるので、とりあえず全部持っていく
+      candidate = raw.slice(start);
+    } else {
+      candidate = raw.slice(start, end + 1);
+    }
+
     try {
       return JSON.parse(candidate) as T;
     } catch (error) {
+      // 引用符が閉じられていない場合の簡易補完
+      let fixed = candidate;
+      const quoteCount = (fixed.match(/"/g) || []).length;
+      if (quoteCount % 2 !== 0) {
+        fixed += '"';
+      }
+
+      // 末尾のカンマを取り除く
+      fixed = fixed.replace(/,\s*$/, "");
+
+      // 括弧のバランスを補完
+      const openBrace = (fixed.match(/{/g) || []).length;
+      const closeBrace = (fixed.match(/}/g) || []).length;
+      const openBracket = (fixed.match(/\[/g) || []).length;
+      const closeBracket = (fixed.match(/]/g) || []).length;
+      const braceBalance = openBrace - closeBrace;
+      const bracketBalance = openBracket - closeBracket;
+
+      if (braceBalance > 0 || bracketBalance > 0) {
+        fixed =
+          fixed +
+          "]".repeat(Math.max(0, bracketBalance)) +
+          "}".repeat(Math.max(0, braceBalance));
+        try {
+          return JSON.parse(fixed) as T;
+        } catch {
+          // 再度失敗した場合は元のエラーログへ
+        }
+      }
+
       console.error(`[${this.name}] JSON parse failed. length:`, candidate.length);
       console.error(`[${this.name}] JSON head:`, candidate.slice(0, 300));
       console.error(`[${this.name}] JSON tail:`, candidate.slice(-300));
@@ -187,6 +229,28 @@ export class GeminiProvider implements AIProvider {
     return name === "AbortError" && message.startsWith("Timeout:");
   }
 
+  private isOutlineGenerationFailed(error: unknown): boolean {
+    const message = String((error as { message?: string })?.message ?? error ?? "");
+    return message.includes("outline_generation_failed");
+  }
+
+  private fixForbiddenOperators(result: AnalysisResult): void {
+    if (!result || !Array.isArray(result.problems)) return;
+    for (const problem of result.problems) {
+      if (!problem || !Array.isArray(problem.steps)) continue;
+      for (const step of problem.steps) {
+        const calc = step?.calculation;
+        if (!calc || typeof calc.expression !== "string") continue;
+        if (calc.expression.includes("*") || calc.expression.includes("/") || calc.expression.includes(",")) {
+          calc.expression = calc.expression
+            .replace(/\*/g, "×")
+            .replace(/\//g, "÷")
+            .replace(/,/g, " "); // カンマはスペースに置換（"3, 4" -> "3 4" になっても後続のバリデーションで弾ける or 修正可能）
+        }
+      }
+    }
+  }
+
   private hasForbiddenOperators(result: AnalysisResult): boolean {
     if (!result || !Array.isArray(result.problems)) return false;
     for (const problem of result.problems) {
@@ -194,6 +258,7 @@ export class GeminiProvider implements AIProvider {
       for (const step of problem.steps) {
         const expr = step?.calculation?.expression;
         if (typeof expr !== "string") continue;
+        if (expr.trim() === "") continue;
         if (expr.includes("*") || expr.includes("/")) return true;
       }
     }
@@ -205,6 +270,117 @@ export class GeminiProvider implements AIProvider {
     if (typeof args.problemText === "string" && args.problemText.length > 220) return true;
     const numConditions = args?.signals?.num_conditions;
     return typeof numConditions === "number" && numConditions >= 2;
+  }
+
+  private normalizeTemplate(template: string): string {
+    const base = (template ?? "").split("|")[0]?.trim().toLowerCase() ?? "";
+    return base.replace(/[-\s]+/g, "_");
+  }
+
+  private hasChoices(problemText?: string): boolean {
+    if (typeof problemText !== "string" || problemText.trim() === "") return false;
+    const text = problemText;
+    return (
+      text.includes("選択肢") ||
+      text.includes("のうち") ||
+      text.includes("どれ") ||
+      /[アイウエ]/.test(text) ||
+      /[①②③④⑤⑥⑦⑧⑨⑩]/.test(text)
+    );
+  }
+
+  private getStepsPlanByTemplate(
+    template: string,
+    meta?: { tags?: string[]; signals?: Record<string, unknown> },
+    problemText?: string
+  ): string[] {
+    const normalized = this.normalizeTemplate(template);
+    const choices = this.hasChoices(problemText);
+    switch (normalized) {
+      case "unit_rate_compare":
+      case "multi_step_compare":
+        return [
+          "基準を決める（1あたり/同じ単位）",
+          "Aの基準あたりを出す",
+          "Bの基準あたりを出す",
+          "数が何を表すか確認（意味づけ、計算なし）",
+          "比べて判断（計算なし）",
+          ...(choices ? ["選択肢照合（計算なし）"] : []),
+        ];
+      case "lcm_square":
+        return [
+          "正方形の条件（たて＝横）を整理（計算なし）",
+          "たて側（4cm側）で作れる長さの候補を考える（必要なら計算1回）",
+          "横側（6cm側）で作れる長さの候補を考える（必要なら計算1回）",
+          "初めてそろう長さを決める（最小公倍数）",
+          "数が何を表すか確認（意味づけ、計算なし）",
+          ...(choices ? ["選択肢照合（計算なし）"] : []),
+        ];
+      case "single_calc":
+        return [
+          "何を求めるかと使う数を整理",
+          "1回の計算で求める",
+          "数が何を表すか確認（意味づけ、計算なし）",
+        ];
+      case "geometry_property":
+        return [
+          "図形の性質や条件を整理",
+          "必要な関係を使って値を求める",
+          "結果が何を表すか確認（意味づけ、計算なし）",
+        ];
+      case "other":
+      default:
+        return [];
+    }
+  }
+
+  private postProcessSteps(result: AnalysisResult, stepsPlan: string[]): void {
+    if (!result || !Array.isArray(result.problems)) return;
+    const roleKeywords = ["意味づけ", "照合", "特定", "整理"];
+    const textKeywords = [
+      "表す", "意味", "単位", "選択肢", "見比べ", "照らし合わせ",
+      "特定", "見つける", "書き出す", "どれかな", "整理", "準備"
+    ];
+    for (const problem of result.problems) {
+      if (!problem || !Array.isArray(problem.steps)) continue;
+      const canUseRole = stepsPlan.length === problem.steps.length;
+      for (let index = 0; index < problem.steps.length; index += 1) {
+        const step = problem.steps[index];
+        const calc = step?.calculation;
+        if (!calc || typeof calc.expression !== "string") continue;
+        const expr = calc.expression.trim();
+        if (!expr.includes("*") && !expr.includes("/") && /^[0-9.]+$/.test(expr)) {
+          delete step.calculation;
+          continue;
+        }
+        const text = `${step?.hint ?? ""} ${step?.solution ?? ""}`;
+        const roleHit =
+          canUseRole && roleKeywords.some((k) => (stepsPlan[index] ?? "").includes(k));
+        const textHit = textKeywords.some((k) => text.includes(k));
+        const isMeaningOrChoice = roleHit || textHit;
+        if (isMeaningOrChoice) {
+          delete step.calculation;
+        }
+      }
+    }
+  }
+
+  private sanitizeAnalysisResult(result: AnalysisResult, stepsPlan?: string[]): void {
+    if (!result || !Array.isArray(result.problems)) return;
+    for (const problem of result.problems) {
+      if (!problem || !Array.isArray(problem.steps)) continue;
+      for (const step of problem.steps) {
+        const calc = step?.calculation;
+        if (!calc) continue;
+        if (typeof calc.expression !== "string" || calc.expression.trim() === "") {
+          delete step.calculation;
+          continue;
+        }
+        if (typeof calc.result !== "number" || !Number.isFinite(calc.result)) {
+          delete step.calculation;
+        }
+      }
+    }
   }
 
   private async generateContent<T>(args: {
@@ -247,7 +423,13 @@ export class GeminiProvider implements AIProvider {
       args.context
     );
 
-    const rawText = response.text ?? "";
+    const rawText =
+      (typeof (response as any).text === "string" ? (response as any).text : "") ||
+      (response as any).response?.candidates?.[0]?.content?.parts
+        ?.map((p: any) => (typeof p?.text === "string" ? p.text : ""))
+        .join("") ||
+      "";
+
     console.log(`[${this.name}] raw model text (${args.context})`, rawText);
     return this.parseJson<T>(rawText, args.context);
   }
@@ -292,6 +474,10 @@ export class GeminiProvider implements AIProvider {
   private async generateOutline(args: {
     problemText: string;
     model: string;
+    temperature?: number;
+    maxOutputTokens?: number;
+    timeoutMs?: number;
+    candidateCount?: number;
   }): Promise<OutlineResult> {
     const prompt = createOutlinePrompt(args.problemText);
     return this.generateContent<OutlineResult>({
@@ -299,8 +485,10 @@ export class GeminiProvider implements AIProvider {
       schema: OUTLINE_SCHEMA as any,
       context: "outline",
       model: args.model,
-      timeoutMs: TIMEOUT_OUTLINE_MS,
-      maxOutputTokens: 800,
+      timeoutMs: args.timeoutMs ?? TIMEOUT_OUTLINE_MS,
+      maxOutputTokens: args.maxOutputTokens ?? 2200,
+      temperature: args.temperature,
+      candidateCount: args.candidateCount,
     });
   }
 
@@ -310,25 +498,48 @@ export class GeminiProvider implements AIProvider {
     model: string;
     maxOutputTokens: number;
     temperature?: number;
-  }): Promise<AnalysisResult> {
+    timeoutMs?: number;
+    candidateCount?: number;
+    chunkIndex: number;
+    chunkCount: number;
+    stepsPlan: string[];
+    stepsPlanSlice: string[];
+    stepStartIndex: number;
+    difficulty?: "easy" | "normal" | "hard";
+  }): Promise<{ steps: MathStep[] }> {
     const outlineText = JSON.stringify(args.outline);
     const append = [
+      `この出力はチャンク生成（${args.chunkIndex + 1}/${args.chunkCount}）です。`,
       "このOUTLINEに従い、steps_planの順でstepsを作る。",
       "steps_planの各項目を1ステップに対応させ、順番を変えない。",
+      "このチャンクでは stepsPlanSlice の分だけ steps を作る。余計な steps は作らない。",
+      `全体 steps_plan: ${JSON.stringify(args.stepsPlan)}`,
+      `対象 stepsPlanSlice: ${JSON.stringify(args.stepsPlanSlice)}`,
+      `steps の id は step_${String(args.stepStartIndex + 1).padStart(2, "0")} から連番にする。`,
       "同じcalculationを重複させない。",
       "* / は絶対に使わず、× ÷ を使う。",
       "spacky_thinking は必須。steps に整理ステップを入れない。",
       `OUTLINE: ${outlineText}`,
     ].join("\n");
-    const prompt = createAnalysisPrompt(args.problemText, append);
-    return this.generateContent<AnalysisResult>({
+    const prompt = createStepsChunkPrompt({
+      problemText: args.problemText,
+      difficulty: args.difficulty ?? "normal",
+      stepTitles: args.stepsPlanSlice,
+      startOrder: args.stepStartIndex + 1,
+      endOrder: args.stepStartIndex + args.stepsPlanSlice.length,
+    });
+
+    console.log(`[${this.name}] generating steps_chunk ${args.chunkIndex + 1}/${args.chunkCount} (orders ${args.stepStartIndex + 1}-${args.stepStartIndex + args.stepsPlanSlice.length})`);
+
+    return this.generateContent<{ steps: MathStep[] }>({
       contents: [{ text: prompt }],
-      schema: ANALYSIS_RESPONSE_SCHEMA,
-      context: "outline_steps",
+      schema: ANALYSIS_STEPS_CHUNK_SCHEMA as any,
+      context: "outline_steps_chunk",
       model: args.model,
-      timeoutMs: TIMEOUT_STEPS_MS,
+      timeoutMs: args.timeoutMs ?? TIMEOUT_STEPS_MS,
       maxOutputTokens: args.maxOutputTokens,
       temperature: args.temperature,
+      candidateCount: args.candidateCount,
     });
   }
 
@@ -356,11 +567,11 @@ export class GeminiProvider implements AIProvider {
         ? extracted.problems
         : extracted?.problem_text
           ? [
-              {
-                id: "p1",
-                problem_text: extracted.problem_text.trim(),
-              },
-            ]
+            {
+              id: "p1",
+              problem_text: extracted.problem_text.trim(),
+            },
+          ]
           : [];
 
     if (problems.length === 0) {
@@ -378,6 +589,7 @@ export class GeminiProvider implements AIProvider {
     metaSignals?: Record<string, unknown>;
     debug?: boolean;
     promptAppend?: string;
+    isPro?: boolean;
   }): Promise<AnalysisResult> {
     this.ensureKey();
     const totalStart = Date.now();
@@ -397,8 +609,13 @@ export class GeminiProvider implements AIProvider {
             : 4096;
 
     const maxOutputTokens = GEMINI_MAX_OUTPUT_TOKENS ?? defaultMaxOutputTokens;
-    const model =
+    let model =
       args.difficulty === "hard" || isGeometry ? GEMINI_COMPLEX_MODEL : GEMINI_SIMPLE_MODEL;
+
+    // Pro フラグがある場合は最上位モデルで上書き
+    if (args.isPro) {
+      model = GEMINI_PRO_MODEL;
+    }
 
     const prompt = createAnalysisPrompt(args.problemText, args.promptAppend);
 
@@ -414,75 +631,231 @@ export class GeminiProvider implements AIProvider {
     });
 
     const runSingleShot = async () => {
+      const timeoutMs = 90_000;
+      const result = await this.generateContent<AnalysisResult>({
+        contents: [{ text: prompt }],
+        schema: ANALYSIS_RESPONSE_SCHEMA,
+        context: "solve_single_shot",
+        model,
+        timeoutMs,
+        maxOutputTokens,
+      });
+      this.fixForbiddenOperators(result);
+      this.sanitizeAnalysisResult(result);
+      const gateOk = !this.hasForbiddenOperators(result);
+      if (!gateOk) {
+        throw new Error("gate_forbidden_operator");
+      }
+      debugInfo.pipelinePath = "single_shot";
+      debugInfo.modelFinal = model;
+      debugInfo.totalMs = Date.now() - totalStart;
+      result._debug = { ...(result._debug ?? {}), ...debugInfo };
+      return result;
+    };
+
+    if (!isHard) {
       try {
-        const result = await this.generateContent<AnalysisResult>({
-          contents: [{ text: prompt }],
-          schema: ANALYSIS_RESPONSE_SCHEMA,
-          context: "solve_single_shot",
-          model,
-          timeoutMs: TIMEOUT_SINGLE_SHOT_MS,
-          maxOutputTokens,
-        });
-        const gateOk = !this.hasForbiddenOperators(result);
+        return await runSingleShot();
+      } catch (error) {
+        if (isJsonError(error)) throw error;
+        console.warn(`[${this.name}] Single shot failed or timed out, falling back to outline_steps`, (error as Error).message);
+      }
+    }
+
+    const runOutlineSteps = async () => {
+      console.log(`[${this.name}] outline_steps start`);
+
+      // outlineもリトライする
+      let outline: any;
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        try {
+          // 1〜2回目は通常、3回目だけトークンを増やして粘る
+          const outlineMaxTokens = attempt < 2 ? 2200 : 3200;
+
+          outline = await this.generateOutline({
+            problemText: args.problemText,
+            model,
+            temperature: 0,
+            maxOutputTokens: outlineMaxTokens,
+            timeoutMs: TIMEOUT_OUTLINE_MS,
+            candidateCount: 1,
+          });
+
+
+          console.log(`[${this.name}] outline attempt=${attempt} ok=true`);
+          break;
+        } catch (error) {
+          const timedOut = this.isTimeoutAbort(error);
+          const reason = timedOut
+            ? "timeout"
+            : isJsonError(error)
+              ? "json_error"
+              : this.isOutlineGenerationFailed(error)
+                ? "outline_generation_failed"
+                : "unknown";
+          console.log(
+            `[${this.name}] outline attempt=${attempt} ok=false timeout=${timedOut} reason=${reason}`
+          );
+          if (attempt === 2) throw error;
+        }
+      }
+
+      if (!outline) {
+        throw new Error("outline_generation_failed");
+      }
+
+      const fixedPlan = this.getStepsPlanByTemplate(
+        outline.template,
+        { tags: args.metaTags, signals: args.metaSignals },
+        args.problemText
+      );
+
+      const stepsPlan =
+        outline.template === "other"
+          ? outline.steps_plan
+          : fixedPlan.length > 0
+            ? fixedPlan
+            : outline.steps_plan;
+
+      const normalizedOutline = { ...outline, steps_plan: stepsPlan };
+
+      // steps生成リトライ（ここは今のままでOK）
+      try {
+        const planLength = stepsPlan.length;
+        const baseChunkCount =
+          planLength <= 4 ? 2 : planLength <= 8 ? 3 : 4;
+        const chunkCount = planLength <= 1 ? 1 : Math.min(baseChunkCount, planLength);
+        const sizes: number[] = [];
+        const baseSize = Math.floor(planLength / chunkCount);
+        const remainder = planLength % chunkCount;
+        for (let i = 0; i < chunkCount; i += 1) {
+          sizes.push(baseSize + (i < remainder ? 1 : 0));
+        }
+
+        const chunkResults: Array<{ steps: MathStep[] } | null> = new Array(chunkCount).fill(null);
+        let startIndex = 0;
+        for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+          const size = sizes[chunkIndex];
+          const slice = stepsPlan.slice(startIndex, startIndex + size);
+          console.log(
+            `[${this.name}] steps_chunk start chunk=${chunkIndex + 1}/${chunkCount} range=${startIndex}-${startIndex + size - 1}`
+          );
+          let chunkResult: { steps: MathStep[] } | null = null;
+          for (let chunkAttempt = 0; chunkAttempt < 2; chunkAttempt += 1) {
+            try {
+              const temperature = chunkAttempt === 0 ? 0.2 : 0;
+              const stepsMaxTokens = chunkAttempt === 0 ? 3000 : 4096; // トークンを引き上げ
+              const timeoutMs = chunkAttempt === 0 ? 60_000 : 90_000;
+              const result = await this.generateStepsFromOutline({
+                problemText: args.problemText,
+                difficulty: args.difficulty,
+                outline: normalizedOutline,
+                model,
+                maxOutputTokens: stepsMaxTokens,
+                temperature,
+                timeoutMs,
+                candidateCount: 1,
+                chunkIndex,
+                chunkCount,
+                stepsPlan,
+                stepsPlanSlice: slice,
+                stepStartIndex: startIndex,
+              });
+              const expectedSteps = slice.length;
+              const actualSteps = Array.isArray(result?.steps)
+                ? result.steps.length
+                : undefined;
+              if (actualSteps !== expectedSteps) {
+                console.warn(`[${this.name}] steps_count_mismatch: chunk=${chunkIndex+1}, expected=${expectedSteps}, actual=${actualSteps}`);
+                throw new Error("steps_count_mismatch");
+              }
+              console.log(
+                `[${this.name}] steps_chunk ok chunk=${chunkIndex + 1}/${chunkCount} attempt=${chunkAttempt}`
+              );
+              chunkResult = result;
+              break;
+            } catch (error) {
+              const timedOut = this.isTimeoutAbort(error);
+              const reason = timedOut
+                ? "timeout"
+                : isJsonError(error)
+                  ? "json_error"
+                  : this.isOutlineGenerationFailed(error)
+                    ? "outline_generation_failed"
+                    : (error as Error)?.message === "steps_count_mismatch"
+                      ? "steps_count_mismatch"
+                      : "unknown";
+              console.log(
+                `[${this.name}] steps_chunk fail chunk=${chunkIndex + 1}/${chunkCount} attempt=${chunkAttempt} reason=${reason}`
+              );
+              if (chunkAttempt === 1) throw error;
+            }
+          }
+          chunkResults[chunkIndex] = chunkResult;
+          startIndex += size;
+        }
+
+        const baseResultSkeleton: AnalysisResult = {
+          status: "success",
+          problems: [
+            {
+              id: "p1",
+              problem_text: args.problemText,
+              spacky_thinking: outline.notes?.join("\n") || "",
+              steps: [] as MathStep[],
+              final_answer: "",
+            },
+          ],
+        };
+
+        const mergedProblems = baseResultSkeleton.problems.map((prob) => ({ ...prob }));
+
+        for (const chunkResult of chunkResults) {
+          if (!chunkResult || !Array.isArray(chunkResult.steps)) continue;
+          // 現状、solveMathProblem は常に1つの問題(p1)を想定
+          const mergedProblem = mergedProblems[0];
+          mergedProblem.steps.push(...chunkResult.steps);
+        }
+
+        const mergedResult: AnalysisResult = {
+          ...baseResultSkeleton,
+          problems: mergedProblems,
+        };
+
+        console.log(`[${this.name}] final mergedResult:`, JSON.stringify(mergedResult, null, 2));
+
+        this.fixForbiddenOperators(mergedResult); // 自動修正を追加
+        this.sanitizeAnalysisResult(mergedResult);
+        this.postProcessSteps(mergedResult, stepsPlan);
+        const gateOk = !this.hasForbiddenOperators(mergedResult);
         const reason = gateOk ? undefined : "forbidden_operator";
         console.log(
-          `[${this.name}] single_shot attempt=0 ok=${gateOk} timeout=false reason=${reason ?? "n/a"}`
+          `[${this.name}] outline_steps attempt=0 ok=${gateOk} timeout=false reason=${reason ?? "n/a"}`
         );
         if (!gateOk) {
           throw new Error("gate_forbidden_operator");
         }
-        debugInfo.pipelinePath = "single_shot";
+
+        debugInfo.pipelinePath = "outline_steps";
         debugInfo.modelFinal = model;
         debugInfo.totalMs = Date.now() - totalStart;
-        result._debug = { ...(result._debug ?? {}), ...debugInfo };
-        return result;
+        mergedResult._debug = { ...(mergedResult._debug ?? {}), ...debugInfo };
+        return mergedResult;
       } catch (error) {
         const timedOut = this.isTimeoutAbort(error);
-        const reason = timedOut ? "timeout" : isJsonError(error) ? "json_error" : "unknown";
+        const reason = timedOut
+          ? "timeout"
+          : isJsonError(error)
+            ? "json_error"
+            : this.isOutlineGenerationFailed(error)
+              ? "outline_generation_failed"
+              : "unknown";
         console.log(
-          `[${this.name}] single_shot attempt=0 ok=false timeout=${timedOut} reason=${reason}`
+          `[${this.name}] outline_steps attempt=0 ok=false timeout=${timedOut} reason=${reason}`
         );
         throw error;
       }
-    };
 
-    const runOutlineSteps = async () => {
-      console.log(`[${this.name}] outline_steps start`);
-      const outline = await this.generateOutline({ problemText: args.problemText, model });
-      for (let attempt = 0; attempt < 2; attempt += 1) {
-        try {
-          const temperature = attempt === 0 ? undefined : 0.2;
-          const result = await this.generateStepsFromOutline({
-            problemText: args.problemText,
-            outline,
-            model,
-            maxOutputTokens,
-            temperature,
-          });
-          const gateOk = !this.hasForbiddenOperators(result);
-          const reason = gateOk ? undefined : "forbidden_operator";
-          console.log(
-            `[${this.name}] outline_steps attempt=${attempt} ok=${gateOk} timeout=false reason=${reason ?? "n/a"}`
-          );
-          if (!gateOk) {
-            continue;
-          }
-          debugInfo.pipelinePath = "outline_steps";
-          debugInfo.modelFinal = model;
-          debugInfo.totalMs = Date.now() - totalStart;
-          result._debug = { ...(result._debug ?? {}), ...debugInfo };
-          return result;
-        } catch (error) {
-          const timedOut = this.isTimeoutAbort(error);
-          const reason = timedOut ? "timeout" : isJsonError(error) ? "json_error" : "unknown";
-          console.log(
-            `[${this.name}] outline_steps attempt=${attempt} ok=false timeout=${timedOut} reason=${reason}`
-          );
-          if (attempt === 1) {
-            throw error;
-          }
-        }
-      }
       throw new Error("AIの出力が途中で崩れました。もう一度試してね。");
     };
 
@@ -507,16 +880,17 @@ export class GeminiProvider implements AIProvider {
   async analyzeFromText(
     problemText: string,
     difficulty: "easy" | "normal" | "hard",
-    meta?: { tags?: string[]; signals?: Record<string, unknown> },
-    options?: { debug?: boolean; promptAppend?: string }
-  ) {
+    meta?: LevelMeta,
+    options?: { debug?: boolean; promptAppend?: string; isPro?: boolean }
+  ): Promise<AnalysisResult> {
     return this.analyzeFromTextInternal({
       problemText,
       difficulty,
       metaTags: meta?.tags,
-      metaSignals: (meta as any)?.signals,
+      metaSignals: meta?.signals,
       debug: options?.debug,
       promptAppend: options?.promptAppend,
+      isPro: options?.isPro,
     });
   }
 
@@ -524,8 +898,14 @@ export class GeminiProvider implements AIProvider {
     imageBase64: string;
     problemText: string;
     difficulty: "easy" | "normal" | "hard";
+    isPro?: boolean;
   }): Promise<AnalysisResult> {
-    return this.analyzeFromTextInternal(args);
+    return this.analyzeFromTextInternal({
+      problemText: args.problemText,
+      difficulty: args.difficulty,
+      imageBase64: args.imageBase64,
+      isPro: args.isPro,
+    });
   }
 
   async analyze(imageBase64: string): Promise<AnalysisResult> {

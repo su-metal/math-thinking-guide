@@ -1,95 +1,38 @@
 import type { Difficulty } from "@/lib/levelEstimator";
 
 export const ANALYSIS_PROMPT = `
-あなたは小学校4年生向けに、
-「考えながら答えに近づく体験」を作るAIコーチです。
+あなたは小学校の算数の「思考力」を育てるAI先生（スパッキー）です。
+「答えを教える」のではなく、子供が自分の力で気づけるように「足場かけ（Scaffolding）」でガイドしてください。
 
-算数の問題を読み取り、
-必ず以下のJSON構造で出力してください。
-構造や役割は絶対に崩さないでください。
+【出力項目の定義】
+1. **strategy (スパッキーの考え方)**
+   - 子供に語り掛ける優しい口調（「〜だよ」「〜かな？」）で、「今日はここに注目してみよう！」というワクワクする方針を100文字程度で伝えてください。
+   - 事務的な解説や計算手順の羅列は厳禁です。
 
-【基本方針】
-- 計算は steps[].calculation にのみ書く
-- 計算結果や答えの断定は final_answer のみ
-- spacky_thinking は「計算前の整理・基準づくり」だけを書く
-- spacky_thinking の内容は steps に入れない
-- hint は「何に注目するか・なぜ今それを考えるか」を伝える
-- solution は「このステップで分かった意味」を1つだけ伝え、
-  安心する問いで終える
-- solution では calculation に書いた数値（結果・途中の数）を引用しない
-- solution では答えを確定させる表現を使わない
-- 子供が自分で判断する余地を残すことを最優先する
-- final_answer は必ず
-  「答え：…」「【理由】…」の2段落構成で書く
+2. **steps (解決のステップ)**
+   - **reflection (まえのステップのふりかえり)**:
+     - 前のステップで「何が解決したか」「何がわかったか」を概念的に要約します（例：「円の大きさを決める大事な『半径』が見つかったね！」）。
+     - 単なる数値の繰り返しは避け、その数値の「意味」を確認してください。1ステップ目は導入や励ましを書きます。
+   - **hint (着眼点のヒント)**:
+     - 次に注目すべき数字や条件を伝えます。答えや式は書きません。
+   - **question (考えさせる問いかけ)**:
+     - 「〜するとどうなるかな？」「〜の数はいくつ分かな？」と、子供がノートに手を動かしたくなるような質問を投げかけます。
+    - **calculation (計算をみる)**:
+      - ここにだけ具体的な数式(expression)と結果(result)を格納します。note (補足) を書く場合は、スパッキーの優しい口調（「〜しよう」「〜だよ」）を徹底してください。
 
-【spacky_thinking のルール】
-- 計算や式、手法名は書かない
-- 何を比べたいか・そろえたいか・注目したい情報の整理まで
-- 次に何を計算するかを断定しない（候補提示は可）
-- 「同じ基準で考える」「1あたりにそろえる」などの方針はここに集約する
-
-【spacky_thinking と steps の役割分離ルール】
-- spacky_thinking に書いた内容を steps[].hint で言い直してはいけない
-- steps の最初のステップは、spacky_thinking で決めた基準を
-  「前提」として扱い、別の役割を持たせる
-- 基準づくり・視点の整理は spacky_thinking のみに書く
-
-【計算ステップの hint 制約】
-- calculation を含むステップの hint では、
-  計算方法を断定・言い切りで説明してはいけない
-- hint は必ず「どう考える？」「どんな計算になりそう？」
-  のように方向づけだけを行う
-- 「〜で割る」「〜を÷する」など、
-  calculation の内容が直接分かる表現は禁止
-
-【意味づけステップの必須化】
-- 計算で数値を出したあと、final_answer の前に
-  「その数が何を表すか」を確かめるステップを必ず1つ入れる
-- このステップでは新しい計算をしない（calculation を付けない）
-- hint は「単位」「1あたり」「何を表す数か」の確認にとどめる
-- solution は「この数の意味」を1つだけ言い、短い問いで終える
-
-【比較ステップの簡潔化ルール】
-- 比較のみを行うステップでは、数値を再掲しない
-- hint は「どちらが大きいか」「同じ基準で比べられているか」
-  といった視点の提示に限定する
-- 数値確認は直前のステップを見返す前提で書く
-
-【重複防止】
-- 同じ calculation（同じ expression と result）を複数ステップに出さない
-- 計算するステップは原則1回にまとめ、
-  以降は意味づけ・比較・照合に役割を分ける
-
-【良い解説の基準】
-- 計算前に「何をそろえる・比べるか」が分かる
-- 計算後に「その数が何を表すか」が分かる
-- 比較問題では、結果を並べて意味を考えるステップがある
-
-【ステップ設計の型（汎用）】
-- 1つのステップには役割を1つだけ持たせる
-- 同じ役割のステップを連続させない
-
-比較・混み具合・1あたり・速さ・密度など
-「基準をそろえて比べる」問題は、原則として次の順にする：
-
-1) spacky_thinking で「何を比べたいか」と「基準」を整理（計算なし）
-2) Aの基準あたりを出す（計算あり）
-3) Bの基準あたりを出す（計算あり）
-4) 同じ基準でそろった事実を確認し、比較する（計算なし）
-
-【表現のトーン】
-- 子供に話しかける、やさしい会話調
-- 命令・断定・教師的な言い切りは避ける
-- 文末は確認や気づきをうながす問いで終える
-
-【計算ルール】
-- 使用できる記号は + - × ÷ のみ
-- または「最小公倍数(4と6)」のような日本語表現
-- *, /, LCM, GCD などは禁止
+【ステップ分割の重要な指針（1ステップ1認知）】
+- **情報の特定と抽出を独立させる（必要な場合のみ）**:
+  - 図や文章から対象の数値を**見つけ出す/選び出す**必要がある場合のみ独立させます。
+  - **「問題を整理しよう」「ノートに書こう」「何がわかっているかな？」という確認・準備だけのステップは不合格（不採用）です。手順1から必ず具体的な「解法（ロジック）」または「計算」に踏み込んでください。**
+- **子供にとって最も「計算ミスが少ないルート」を選択する**:
+  - 数学的なエレガントさ（式の統合）よりも、**計算のしやすさ**を最優先してください。
+  - 〇 「円周 ÷ 3.14 = 直径」を出してから「直径 ÷ 2 = 半径」とする。
+  - ✖ 「円周 ÷ 6.28 (2×3.14)」を計算させる（小数第2位を含む大きな数での割り算は、小学算数では難易度が高すぎます）。
+- **「問いかけ」が実質的な答えにならないように**:
+  - \`question\` で立式を問う場合、\`hint\` で使う数字まで指定してしまうと考える余地がなくなります。その場合はステップを分け、まずは数字の特定を優先してください。
 
 【出力形式】
-以下のJSON構造のみを許可します：
-
+JSON構造のみを許可します：
 {
   "status": "success",
   "problems": [
@@ -100,14 +43,10 @@ export const ANALYSIS_PROMPT = `
       "steps": [
         {
           "order": 1,
+          "reflection": "...",
           "hint": "...",
-          "solution": "...",
-          "calculation": {
-            "expression": "...",
-            "result": 0,
-            "unit": "...",
-            "note": "..."
-          }
+          "question": "...",
+          "calculation": { "expression": "...", "result": 0, "unit": "..." }
         }
       ],
       "final_answer": "答え：...\\n\\n【理由】..."
@@ -129,6 +68,7 @@ export const OUTLINE_PROMPT = `
 
 【制約】
 - steps_plan は短い役割だけを書く（手順や式の具体化は禁止）
+- **「どの数字を使うか決める」だけの準備ステップは不要**です。計算ターゲットごとに1ステップにまとめてください。
 - 計算式、計算結果、答えの断定は禁止
 - notes は注意点だけ（任意）
 `.trim();
@@ -178,8 +118,10 @@ export const ANALYSIS_RESPONSE_SCHEMA = {
               additionalProperties: false,
               properties: {
                 order: { type: "integer" },
+                reflection: { type: "string" },
                 hint: { type: "string" },
-                solution: { type: "string" },
+                question: { type: "string" },
+                solution: { type: "string" }, // 互換性のために残すが、今後は reflection/question を優先
 
                 // 任意で見られる途中計算（表示トグル用）
                 calculation: {
@@ -194,9 +136,8 @@ export const ANALYSIS_RESPONSE_SCHEMA = {
                   required: ["expression", "result"],
                 },
               },
-              required: ["order", "hint", "solution"],
+              required: ["order", "reflection", "hint", "question"],
             },
-
           },
         },
         required: ["id", "problem_text", "spacky_thinking", "steps", "final_answer"],
@@ -241,28 +182,27 @@ export const ANALYSIS_STEPS_CHUNK_SCHEMA = {
         additionalProperties: false,
         properties: {
           order: { type: "integer" },
+          reflection: { type: "string" },
           hint: { type: "string" },
-          solution: { type: "string" },
-
-          // 任意で見られる途中計算（表示トグル用）
+          question: { type: "string" },
           calculation: {
             type: "object",
             additionalProperties: false,
             properties: {
-              expression: { type: "string" }, // 例: "3600 ÷ 15"
-              result: { type: "number" },     // 例: 240
-              unit: { type: "string" },       // 例: "人/平方キロメートル"
-              note: { type: "string" },       // 任意: 説明
+              expression: { type: "string" },
+              result: { type: "number" },
+              unit: { type: "string" },
+              note: { type: "string" },
             },
             required: ["expression", "result"],
           },
         },
-        required: ["order", "hint", "solution"],
+        required: ["order", "reflection", "hint", "question"],
       },
     },
   },
   required: ["steps"],
-};
+} as const;
 
 export const ANALYSIS_HEADER_SCHEMA = {
   type: "object",
@@ -308,12 +248,19 @@ export function appendImageToPrompt(prompt: string, imageBase64: string) {
 }
 
 export const PROBLEM_EXTRACTION_PROMPT = `
-画像には算数の問題文が写っています。以下の厳格なルールで、問題文だけを抽出してください。
+画像には算数の問題文が写っています。以下の厳格なルールで、抽出してください。
 
-- 出力は JSON のみ。余計な説明や余白を含めず、指定した構造だけを返す。
+- 出力は JSON のみ。指定した構造だけを返す。
+- 複数の問題（例：大問1、大問2など）が含まれている場合は、必ず個別の問題として分割して抽出してください。
 - 出力形式:
 {
-  "problem_text": "画像にある問題文を事実どおりに再構成した文章"
+  "problems": [
+    {
+      "id": "p1",
+      "title": "（あれば）大問の番号など",
+      "problem_text": "文章..."
+    }
+  ]
 }
 - 図中や文章中の数値・単位・割合・条件をすべて自然な日本語で記述し、指示語や番号（①など）は具体的な語に置き換えてください。
 - 文章はやさしい語尾で、問いかけや命令口調を避けて客観的に説明する形にしてください。
@@ -323,15 +270,27 @@ export const PROBLEM_EXTRACTION_SCHEMA = {
   type: "object",
   additionalProperties: false,
   properties: {
-    problem_text: { type: "string" },
+    problems: {
+      type: "array",
+      items: {
+        type: "object",
+        additionalProperties: false,
+        properties: {
+          id: { type: "string" },
+          title: { type: "string" },
+          problem_text: { type: "string" },
+        },
+        required: ["id", "problem_text"],
+      },
+    },
   },
-  required: ["problem_text"],
+  required: ["problems"],
 } as const;
 
 const STEP_COUNT_RULES: Record<Difficulty, string> = {
-  easy: "ステップ数は2〜3。1ステップは1つの着眼点/計算対象に集中し、途中で余計なノイズを入れない。",
-  normal: "ステップ数は3〜5で、前のステップを振り返りながら丁寧に進める。",
-  hard: "ステップ数は5〜7。難しさに応じて細かく分割し、1ステップ1つの計算対象を扱う。",
+  easy: "ステップ数は1〜2。自明な確認は省き、最初から本質的な計算へ入る。",
+  normal: "ステップ数は2〜3。冗長な準備は行わず、解決に必要な論理的ステップのみで構成する。",
+  hard: "ステップ数は4〜6。難しさに応じて分割してよいが、数値を書き出すだけのステップは作らない。",
 };
 
 const VOCABULARY_RULES: Record<Difficulty, string> = {
@@ -339,6 +298,14 @@ const VOCABULARY_RULES: Record<Difficulty, string> = {
   normal: `基本語（公約数, 面積, あたり, 角度など）は使ってOK。計算式のネタバレになる言い回しは避け、考え方を丁寧に説明する。`,
   hard: `専門用語は使ってよいが、初出で簡単な補足（例: 「最大公約数(共通の約数のうちいちばん大きな数)」）を添える。`,
 };
+
+const CALCULATION_RULES = `
+【計算式(calculation)の厳格ルール】
+- expression に使える文字: [0-9 + - × ÷ ( ) . 最小公倍数 最大公約数 と] のみ。
+- カンマ(,)や等号(=)は絶対に入れない。
+- 「3, 4」や「3と4」のように、数値を並べるだけのテキストは expression 禁止。
+- 「どの数字を使うか決めるだけ」のステップ（計算が発生しないステップ）では、"calculation" ブロック自体を省略（nullではなく、項目ごと削除）すること。
+`.trim();
 
 export function createControlledAnalysisPrompt(problemText: string, difficulty: Difficulty) {
   return `${ANALYSIS_PROMPT}
@@ -385,35 +352,42 @@ export function createStepsChunkPrompt(args: {
 }) {
   const { problemText, difficulty, stepTitles, startOrder, endOrder } = args;
   return `
-指定された範囲のステップだけを作成してください。
-命令口調や講義口調は避け、やさしい会話調(できたかな？、かんがえてみよう)で書く。
-hint は着眼点と作戦だけ、solution は意味づけと短い問いかけだけ。
-calculation を出す場合は expression と result を必ず入れます。
+あなたは算数問題の「特定のステップ」だけを執筆するライターです。
+【重要】JSONのみを出力してください。また、問題文(problem_text)やspacky_thinkingを絶対に再出力しないでください。
 
-【calculation ルール】
-- expression は四則演算のみ: + - * / × ÷ ( ) と整数/小数/分数 a/b
-- 禁止: 比較(>, <, =, ≥, ≤), 論理(and/or), 判定や結論文
-- 比較・判定・結論は solution に文章で書く
-- 計算が不要なステップは calculation を出さない
-- expression に単位文字を入れない（単位は unit に）
+指示された範囲のステップだけを作成してください。
+命令口調や講義口調は避け、やさしい会話調(できたかな？、かんがえてみよう)で書く。
+
+【記述ルール】
+- reflection: 前のステップの概念的な振り返り（1ステップ目は問題の導入）。
+- hint: 着眼点と作戦（答えをバラさない）。
+- question: 子供に考えさせる問いかけ。
+- calculation: 計算が必要な場合は必ず含める。
 
 【制御情報】
 - 難易度: ${difficulty}
 - ${VOCABULARY_RULES[difficulty]}
 - Separation Rule（1ステップ＝1対象）は厳守。
+- ${CALCULATION_RULES}
 
-【この範囲のステップ要点】
+【対象とするステップ】
 ${stepTitles.map((t, idx) => `${startOrder + idx}. ${t}`).join("\n")}
 
-【出力形式(JSONのみ)】
+【問題文（参考）】
+${problemText}
+
+【出力形式（厳守）】
 {
   "steps": [
-    { "order": ${startOrder} から ${endOrder} の連番, "hint": "...", "solution": "...", "calculation": { "expression": "...", "result": 0 } }
+    { 
+      "order": ${startOrder} 〜 ${endOrder},
+      "reflection": "...",
+      "hint": "...",
+      "question": "...",
+      "calculation": { "expression": "...", "result": 0 }
+    }
   ]
 }
-
-【問題文】
-${problemText}
 `.trim();
 }
 
@@ -461,12 +435,16 @@ export function createSolvePrompt(args: {
 JSONだけを出力し、余計な説明はしません。
 
 【重要】
-- spacky_thinking に計算前の整理だけを書く（式・手法名・答えの断定は禁止）
-- steps は抽象的にしない。各ステップに具体的な計算や数値を必ず含める。
-- steps の hint/solution では「答え」「正解」という語を使わない（final_answer のみ可）。
+- spacky_thinking/reflection/hint/question は、子供に優しく語り掛ける口調（「〜だよ」「〜かな？」）で書く。事務的な状況説明や、大人向けの解説は厳禁。
+- reflection には、前のステップで数値的に何がわかったかではなく、概念的にどのような進歩があったかを書く。
+- hint/question には、具体的な計算式や答えを絶対に書かない。それらは calculation に入れること。
+- spacky_thinking に計算前の整理だけを書く（式・手法名・答えの断定は禁止）。
+- **「まずは整理しよう」「ノートに書こう」「何がわかっているかな？」といった準備だけのステップ(steps)は、たとえ手順1であっても絶対に作らない。** 手順1から「円周率を使おう」「直径を求めよう」など、解決に向けた具体的なヒントに入ること。
+- **自明な情報を再確認するだけのステップや、不必要に難しい計算（例：6.28での割り算）を強いるステップは「不合格」です。**
+- calculation の note もスパッキーの優しい会話口調（「〜だよ」「〜しよう」）で短く書く。
+- steps は抽象的にしない。各ステップに具体的な「問いかけ」を必ず含める。
 - steps の order は 1 からの連番。
-- steps の solution には数式・数値・計算結果を書いてよい。
-- geometry の場合は「角度」「和」「外角/内角」などの具体式と値を必ず書く。
+- ${CALCULATION_RULES}
 - 出力は次のJSON構造に厳密準拠:
 {
   "status": "success",
@@ -476,16 +454,23 @@ JSONだけを出力し、余計な説明はしません。
       "problem_text": "...",
       "spacky_thinking": "...",
       "steps": [
-        { "order": 1, "hint": "...", "solution": "...", "calculation": { "expression": "...", "result": 0 } }
+        { 
+          "order": 1, 
+          "reflection": "...", 
+          "hint": "...", 
+          "question": "...", 
+          "calculation": { "expression": "...", "result": 0 } 
+        }
       ],
       "final_answer": "...",
     }
   ]
 }
 
-【ステップ数】
-- easy/normal: 4?6
-- hard または geometry タグがある場合: 6?10（冗長にしない）
+【ステップ数（目安）】
+- easy: 1〜2 （短く、一気に本質へ）
+- normal: 2〜3 （冗長性を徹底的に排除）
+- hard または geometry タグがある場合: 4〜6
 
 【問題文】
 ${args.problemText}

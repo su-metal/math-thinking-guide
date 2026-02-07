@@ -11,12 +11,13 @@ export interface AIProvider {
     problemText: string,
     difficulty: Difficulty,
     meta?: LevelMeta,
-    options?: { debug?: boolean; promptAppend?: string }
+    options?: { debug?: boolean; promptAppend?: string; isPro?: boolean }
   ): Promise<AnalysisResult>;
   analyzeWithControls(args: {
     imageBase64: string;
     problemText: string;
     difficulty: Difficulty;
+    isPro?: boolean;
   }): Promise<AnalysisResult>;
   generateDrill(originalProblem: string): Promise<DrillResult>;
 }

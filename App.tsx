@@ -53,17 +53,80 @@ const isAbortError = (error: unknown): boolean => {
   return name === 'AbortError';
 };
 
-const persistHistory = (items: HistoryItem[]): HistoryItem[] => {
+const STORAGE_KEY = 'math_history';
+const MAX_ITEMS = 3;
+const MAX_BYTES = 1_500_000;
+const MAX_TEXT_CHARS = 180;
+const FALLBACK_SPACKY = 'まず情報を整理して、同じ基準で比べられる形を考えてみよう。';
+
+const getByteSize = (value: string) => {
+  if (typeof TextEncoder !== 'undefined') {
+    return new TextEncoder().encode(value).length;
+  }
+  return value.length;
+};
+
+const truncateText = (value: string | undefined, maxChars: number) => {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  return text.length > maxChars ? `${text.slice(0, maxChars)}…` : text;
+};
+
+// HistoryItem shape (source):
+// { id, timestamp, image(base64), result:{ status, problems:[{problem_text, spacky_thinking, steps, final_answer}], meta, _debug } }
+const toStorable = (item: HistoryItem, fallbackId: string): HistoryItem => {
+  const problem = item?.result?.problems?.[0];
+  const storableProblem = {
+    id: problem?.id ?? 'p1',
+    problem_text: truncateText(problem?.problem_text, MAX_TEXT_CHARS),
+    spacky_thinking: truncateText(problem?.spacky_thinking, MAX_TEXT_CHARS) || FALLBACK_SPACKY,
+    steps: [],
+    final_answer: truncateText(problem?.final_answer, MAX_TEXT_CHARS),
+  };
+
+  return {
+    id: item?.id ?? fallbackId,
+    timestamp: typeof item?.timestamp === 'number' ? item.timestamp : Date.now(),
+    image: '',
+    result: {
+      status: item?.result?.status ?? 'success',
+      problems: [storableProblem],
+      meta: item?.result?.meta,
+    },
+    allProblems: item.allProblems,
+  };
+};
+
+const needsMigration = (item: HistoryItem): boolean => {
+  if (typeof item?.image === 'string' && item.image.startsWith('data:')) return true;
+  if (item?.result?._debug) return true;
+  const problems = item?.result?.problems;
+  if (Array.isArray(problems) && problems.length > 1) return true;
+  if (Array.isArray(problems) && problems.some((p) => (p?.steps?.length ?? 0) > 0)) return true;
+  return false;
+};
+
+const trimToLimits = (items: HistoryItem[]) => {
+  let trimmed = items.slice(0, MAX_ITEMS);
+  while (trimmed.length > 0 && getByteSize(JSON.stringify(trimmed)) > MAX_BYTES) {
+    trimmed = trimmed.slice(0, trimmed.length - 1);
+  }
+  return trimmed;
+};
+
+const saveHistoryLocal = (items: HistoryItem[]): HistoryItem[] => {
   if (items.length === 0) {
-    localStorage.removeItem('math_history');
+    localStorage.removeItem(STORAGE_KEY);
     return [];
   }
 
-  const limits = [5, 3, 1];
+  const storable = items.map((item, index) => toStorable(item, `h_${Date.now()}_${index}`));
+  const limits = [MAX_ITEMS, 2, 1];
   for (const limit of limits) {
-    const candidate = items.slice(0, limit);
+    const candidate = trimToLimits(storable.slice(0, limit));
+    if (candidate.length === 0) continue;
     try {
-      localStorage.setItem('math_history', JSON.stringify(candidate));
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(candidate));
       return candidate;
     } catch (error) {
       console.error(`Failed to persist math_history (limit ${limit})`, error);
@@ -73,21 +136,41 @@ const persistHistory = (items: HistoryItem[]): HistoryItem[] => {
     }
   }
 
-  localStorage.removeItem('math_history');
-  return items.slice(0, 1);
+  localStorage.removeItem(STORAGE_KEY);
+  return [];
 };
 
-const loadStoredHistory = (): HistoryItem[] => {
-  const raw = localStorage.getItem('math_history');
+const loadHistoryLocal = (): HistoryItem[] => {
+  const raw = localStorage.getItem(STORAGE_KEY);
   if (!raw) return [];
   try {
     const parsed = JSON.parse(raw);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    let migrated = false;
+    const normalized = parsed.map((item, index) => {
+      const typed = item as HistoryItem;
+      if (needsMigration(typed)) migrated = true;
+      return toStorable(typed, `h_${Date.now()}_${index}`);
+    });
+    if (migrated) {
+      return saveHistoryLocal(normalized);
+    }
+    return normalized;
   } catch (error) {
     console.error('Failed to parse saved math_history', error);
-    localStorage.removeItem('math_history');
+    localStorage.removeItem(STORAGE_KEY);
     return [];
   }
+};
+
+const saveHistory = (items: HistoryItem[]): HistoryItem[] => {
+  // TODO: swap to DB for Pro plan
+  return saveHistoryLocal(items);
+};
+
+const loadHistory = (): HistoryItem[] => {
+  // TODO: swap to DB for Pro plan
+  return loadHistoryLocal();
 };
 
 
@@ -224,11 +307,11 @@ const LimitReachedModal = ({ onConfirm, onCancel }: { onConfirm: () => void, onC
       <div className="w-20 h-20 bg-orange-50 rounded-full flex items-center justify-center mb-6">
         <AlertCircle className="w-10 h-10 text-orange-500" />
       </div>
-      <h2 className="text-2xl font-bold text-gray-800 mb-4">今日のぶんはおしまい！</h2>
+      <h2 className="text-2xl font-bold text-gray-800 mb-4">チケットがなくなったよ！</h2>
       <p className="text-gray-500 mb-8 leading-relaxed">
-        無料プランでは1日に3回まで<br />
-        問題を解くことができるよ。<br />
-        <span className="font-bold text-blue-500">Proプラン</span>なら、ずっと使い放題！
+        今週の無料チケット（3枚）を使い切ったよ。<br />
+        <span className="font-bold text-blue-500">Proプラン</span>なら、チケットなしで<br />
+        高品質なAIガイドが使い放題！
       </p>
       <div className="w-full space-y-3">
         <button
@@ -489,18 +572,38 @@ const App: React.FC = () => {
       }
     }, 2000);
 
-    const historyFromStorage = loadStoredHistory();
+    const historyFromStorage = loadHistory();
     setHistory(historyFromStorage);
 
-    const lastReset = localStorage.getItem('last_reset_date');
-    const today = new Date().toLocaleDateString();
-    if (lastReset !== today) {
-      localStorage.setItem('last_reset_date', today);
-      localStorage.setItem('remaining_tries', '3');
+    // クレジット（チケット）残数の初期化
+    const savedCredits = localStorage.getItem('user_credits');
+    const lastResetTime = localStorage.getItem('last_weekly_reset_time');
+    const now = Date.now();
+    const ONE_WEEK = 7 * 24 * 60 * 60 * 1000;
+
+    if (!lastResetTime) {
+      // 初回起動時: チケット3枚付与 & 現在時刻を保存
+      localStorage.setItem('user_credits', '3');
+      localStorage.setItem('last_weekly_reset_time', now.toString());
       setRemainingTries(3);
     } else {
-      const tries = localStorage.getItem('remaining_tries');
-      if (tries) setRemainingTries(parseInt(tries));
+      const elapsed = now - parseInt(lastResetTime);
+      if (elapsed >= ONE_WEEK) {
+        // 1週間以上経過: チケットを3枚に回復
+        localStorage.setItem('user_credits', '3');
+        localStorage.setItem('last_weekly_reset_time', now.toString());
+        setRemainingTries(3);
+      } else if (savedCredits !== null) {
+        setRemainingTries(parseInt(savedCredits));
+      } else {
+        setRemainingTries(0);
+      }
+    }
+
+    // Pro状態の読み込み
+    const savedPro = localStorage.getItem('is_pro');
+    if (savedPro === 'true') {
+      setIsPro(true);
     }
 
     return () => clearTimeout(timer);
@@ -515,20 +618,14 @@ const App: React.FC = () => {
     }
   };
 
-  const saveHistory = (item: HistoryItem) => {
+  const appendHistoryItem = (item: HistoryItem) => {
     setHistory((prev) => {
       const combined = [item, ...prev];
-      return persistHistory(combined);
+      return saveHistory(combined);
     });
   };
 
-  const decreaseTries = () => {
-    if (!isPro) {
-      const newTries = Math.max(0, remainingTries - 1);
-      setRemainingTries(newTries);
-      localStorage.setItem('remaining_tries', newTries.toString());
-    }
-  };
+  // Removed decreaseTries function as credit consumption is now handled directly in selectProblem
 
   const navigateToOnboarding = () => {
     setPrevScreen(currentScreen);
@@ -586,34 +683,7 @@ const App: React.FC = () => {
       setReadProblemText(extractedProblems[0]?.problem_text ?? null);
       setReadProblems(extractedProblems);
       setAnalysisPhase("read_done");
-
-      if (extractedProblems.length > 1) {
-        setCurrentScreen(AppScreen.PROBLEM_SELECT);
-        return;
-      }
-
-      const solveController = new AbortController();
-      solveAbortRef.current = solveController;
-      setAnalysisPhase("solving");
-      const result = await solveMathProblem(extractedProblems[0].problem_text, undefined, solveController.signal);
-      if (requestIdRef.current !== requestId) return;
-
-      console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
-      setAnalysisResult(result);
-      setCurrentProblemIndex(0);
-      setCurrentStepIndex(0);
-      setAnalysisPhase("done");
-      setCurrentScreen(AppScreen.RESULT);
-
-      const historyItem: HistoryItem = {
-        id: Date.now().toString(),
-        timestamp: Date.now(),
-        image: img,
-        result: result
-      };
-      console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
-      saveHistory(historyItem);
-      decreaseTries();
+      setCurrentScreen(AppScreen.PROBLEM_SELECT);
     } catch (err: any) {
       if (isAbortError(err)) {
         return;
@@ -630,44 +700,66 @@ const App: React.FC = () => {
     const selected = selectableProblems[index];
     if (!selected) return;
 
-    if (!analysisResult && readProblems) {
-      setReadProblemText(selected.problem_text);
-      setAnalysisPhase("solving");
-      setCurrentScreen(AppScreen.LOADING);
+    // もし抽出された問題リストがある場合（スキャン直後や完了画面から戻った場合）
+    if (readProblems) {
+      const currentSolvedText = analysisResult?.problems?.[0]?.problem_text;
+      const needsSolve = !analysisResult || currentSolvedText !== selected.problem_text;
 
-      const solveController = new AbortController();
-      solveAbortRef.current = solveController;
+      if (needsSolve) {
+        setReadProblemText(selected.problem_text);
+        setAnalysisPhase("solving");
+        setCurrentScreen(AppScreen.LOADING);
 
-      try {
-        const result = await solveMathProblem(selected.problem_text, undefined, solveController.signal);
-        console.log("[debug] before setAnalysisResult method_hint", result?.problems?.[0]?.method_hint);
-        setAnalysisResult(result);
-        setCurrentProblemIndex(0);
-        setCurrentStepIndex(0);
-        setAnalysisPhase("done");
-        setCurrentScreen(AppScreen.RESULT);
+        const solveController = new AbortController();
+        solveAbortRef.current = solveController;
 
-        const historyItem: HistoryItem = {
-          id: Date.now().toString(),
-          timestamp: Date.now(),
-          image: croppedImage ?? "",
-          result: result
-        };
-        console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
-        saveHistory(historyItem);
-        decreaseTries();
-      } catch (err: any) {
-        if (isAbortError(err)) {
-          return;
+        try {
+          const result = await solveMathProblem(selected.problem_text, analysisResult?.meta, isPro, solveAbortRef.current.signal);
+
+          console.log("---------- [SPACKY AI SOLUTION START] ----------");
+          console.log(JSON.stringify(result, null, 2));
+          console.log("---------- [SPACKY AI SOLUTION END] ----------");
+
+          setAnalysisResult(result);
+          setCurrentProblemIndex(0); // solveResultは常に1件
+          setCurrentStepIndex(0);
+          setAnalysisPhase("done");
+          setCurrentScreen(AppScreen.RESULT);
+
+          const historyItem: HistoryItem = {
+            id: Date.now().toString(),
+            timestamp: Date.now(),
+            image: croppedImage ?? "",
+            result: result,
+            allProblems: readProblems ?? []
+          };
+          console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
+          appendHistoryItem(historyItem);
+
+          // クレジットの消費（成功時のみ）
+          if (!isPro) {
+            const nextCredits = Math.max(0, remainingTries - 1);
+            setRemainingTries(nextCredits);
+            localStorage.setItem('user_credits', nextCredits.toString());
+          }
+        } catch (err: any) {
+          if (isAbortError(err)) {
+            return;
+          }
+          setAnalysisPhase("error");
+          alert(err.message || "エラーがおきました。もういちど試してね。");
+          setCurrentScreen(AppScreen.HOME);
         }
-        setAnalysisPhase("error");
-        alert(err.message || "エラーがおきました。もういちど試してね。");
-        setCurrentScreen(AppScreen.HOME);
+        return;
+      } else {
+        // すでに解かれている問題ならそのまま表示
+        setCurrentProblemIndex(0);
       }
-      return;
+    } else {
+      // 履歴から直接開く場合など
+      setCurrentProblemIndex(index);
     }
 
-    setCurrentProblemIndex(index);
     setCurrentStepIndex(0);
     setShowFinalAnswer(false);
     setCurrentScreen(AppScreen.RESULT);
@@ -707,6 +799,16 @@ const App: React.FC = () => {
           {/* watermark */}
           <div className="absolute top-3 right-4 opacity-15 text-amber-500">
             <Lightbulb className="w-16 h-16" />
+          </div>
+          {/* チケット残数カウンター */}
+          <div className="flex justify-between items-center mb-6">
+            <div className="flex items-center gap-2 px-4 py-2 bg-blue-50 rounded-2xl border border-blue-100">
+              <Sparkles className="text-blue-500" size={18} />
+              <span className="text-sm font-bold text-blue-700">今週のチケット</span>
+              <span className="px-2 py-0.5 bg-blue-500 text-white rounded-lg text-xs font-black">
+                のこり {remainingTries}枚
+              </span>
+            </div>
           </div>
 
           <div className="flex items-center gap-3 mb-3">
@@ -775,10 +877,10 @@ const App: React.FC = () => {
 
             <div className="bg-white rounded-3xl p-6 shadow-sm border border-blue-50 flex items-center justify-between relative overflow-hidden">
               <div className="flex items-center gap-4">
-                <div className="bg-blue-100 p-3 rounded-2xl shrink-0"><Lightbulb className="text-blue-500" /></div>
+                <div className="bg-blue-100 p-3 rounded-2xl shrink-0"><Sparkles className="text-blue-500" /></div>
                 <div>
-                  <p className="text-[10px] text-gray-400 font-black uppercase tracking-wider">今日ののこり</p>
-                  <p className="text-lg font-black text-gray-800">{isPro ? "無制限だよ！" : `あと ${remainingTries} 回`}</p>
+                  <p className="text-[10px] text-gray-400 font-black uppercase tracking-wider">今週のチケット</p>
+                  <p className="text-lg font-black text-gray-800">{isPro ? "無制限だよ！" : `のこり ${remainingTries} 枚`}</p>
                 </div>
               </div>
               {!isPro && (
@@ -917,7 +1019,7 @@ const App: React.FC = () => {
             </p>
           </div>
 
-          <div className="w-full flex overflow-x-auto snap-x snap-mandatory scrollbar-hide gap-6 px-4 pb-8">
+          <div className={`w-full flex overflow-x-auto snap-x snap-mandatory scrollbar-hide gap-6 px-4 pb-8 ${selectableProblems.length === 1 ? 'justify-center' : ''}`}>
             {selectableProblems.map((p, idx) => (
               <div
                 key={p.id || idx}
@@ -946,12 +1048,16 @@ const App: React.FC = () => {
             ))}
           </div>
 
-          <div className="flex gap-2">
-            {selectableProblems.map((_, idx) => (
-              <div key={idx} className={`w-2 h-2 rounded-full bg-blue-200`} />
-            ))}
-          </div>
-          <p className="mt-6 text-xs text-gray-400 font-black">横にスワイプしてえらんでね</p>
+          {selectableProblems.length > 1 && (
+            <>
+              <div className="flex gap-2">
+                {selectableProblems.map((_, idx) => (
+                  <div key={idx} className={`w-2 h-2 rounded-full bg-blue-200`} />
+                ))}
+              </div>
+              <p className="mt-6 text-xs text-gray-400 font-black">横にスワイプしてえらんでね</p>
+            </>
+          )}
         </main>
       </div>
     );
@@ -1091,14 +1197,12 @@ const App: React.FC = () => {
                       <Undo2 size={20} /> 解説にもどる
                     </button>
 
-                    {hasMultipleProblems && (
-                      <button
-                        onClick={() => setCurrentScreen(AppScreen.PROBLEM_SELECT)}
-                        className="w-full bg-white border-2 border-gray-100 text-gray-500 py-4 rounded-2xl font-black flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
-                      >
-                        <LayoutList size={20} /> 他の問題をえらぶ
-                      </button>
-                    )}
+                    <button
+                      onClick={() => setCurrentScreen(AppScreen.PROBLEM_SELECT)}
+                      className="w-full bg-blue-50 border-2 border-blue-200 text-blue-600 py-4 rounded-2xl font-black flex items-center justify-center gap-2 active:scale-95 transition-all shadow-sm"
+                    >
+                      <LayoutList size={20} /> 同じ写真のほかの問題を解く
+                    </button>
 
                     <button
                       onClick={() => setCurrentScreen(AppScreen.HOME)}
@@ -1163,21 +1267,21 @@ const App: React.FC = () => {
                 </div>
               </div>
 
-              {prevStep && (
-                <div className="mb-6 animate-in fade-in slide-in-from-top-4 duration-500">
+              {currentStep?.reflection && (
+                <div className="mb-6 animate-in fade-in slide-in-from-top-4 duration-500 text-left">
                   <div className="bg-blue-50/50 rounded-2xl p-4 border border-blue-100 relative">
                     <p className="text-[10px] font-black text-blue-400 uppercase mb-1">
-                      まえのステップのふりかえり
+                      {prevStep ? "まえのステップのふりかえり" : "スパッキーのアドバイス"}
                     </p>
 
                     {/* 会話の説明（常時表示） */}
                     <p className="text-sm font-black text-blue-700 leading-relaxed">
-                      {prevStep.solution}
+                      {currentStep.reflection}
                     </p>
 
-                    {/* 途中計算（任意表示） */}
+                    {/* 途中計算（任意表示：前のステップのもの） */}
                     {(() => {
-                      const calc = prevStep.calculation;
+                      const calc = prevStep?.calculation;
                       const expr =
                         typeof calc?.expression === "string" ? calc.expression.trim() : "";
 
@@ -1246,9 +1350,14 @@ const App: React.FC = () => {
                   />
                 ) : (
                   <>
-                    <div className="bg-white p-6 rounded-[2rem] border-2 border-dashed border-blue-100 w-full min-h-[160px] flex flex-col items-center justify-center relative">
+                    <div className="bg-white p-6 rounded-[2rem] border-2 border-dashed border-blue-100 w-full min-h-[160px] flex flex-col items-center justify-center relative space-y-4">
+                      {currentStep?.hint && (
+                        <p className="text-sm font-black text-blue-400 leading-relaxed">
+                          {currentStep.hint}
+                        </p>
+                      )}
                       <p className="text-xl font-black text-gray-800 leading-relaxed">
-                        {currentStep?.hint}
+                        {currentStep?.question || currentStep?.hint}
                       </p>
                     </div>
                     <div className="mt-4 flex items-center gap-2">
@@ -1428,21 +1537,28 @@ const App: React.FC = () => {
               onClick={() => {
                 setAnalysisResult(item.result);
                 setCroppedImage(item.image);
+                setReadProblems(item.allProblems ?? null);
                 setCurrentProblemIndex(0);
                 setCurrentStepIndex(0);
                 setCurrentScreen(
-                  item.result.problems.length > 1
+                  (item.allProblems?.length ?? 0) > 1
                     ? AppScreen.PROBLEM_SELECT
                     : AppScreen.RESULT
                 );
               }}
               className="w-full bg-white p-4 rounded-3xl flex items-center gap-4 shadow-sm text-left"
             >
-              <img
-                src={item.image}
-                className="h-16 w-16 object-contain bg-gray-50 rounded-xl shrink-0"
-                alt="history"
-              />
+              {item.image ? (
+                <img
+                  src={item.image}
+                  className="h-16 w-16 object-contain bg-gray-50 rounded-xl shrink-0"
+                  alt="history"
+                />
+              ) : (
+                <div className="h-16 w-16 bg-gray-50 rounded-xl shrink-0 flex items-center justify-center text-gray-300">
+                  <ImageIcon size={20} />
+                </div>
+              )}
               <div className="flex-1 min-w-0">
                 <p className="text-[10px] text-gray-400">
                   {new Date(item.timestamp).toLocaleDateString('ja-JP')}

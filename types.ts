@@ -8,7 +8,15 @@ export type StepCalculation = {
 
 export interface MathStep {
   order: number;
-  hint: string;     // そのステップで考えること（ヒント）
+  
+  // 振り返り: 前のステップで何がわかったか（1ステップ目は導入/null）
+  reflection?: string;
+
+  // そのステップで考えること（ヒント）
+  hint: string;     
+
+  // 問いかけ: 子供に考えさせる質問
+  question?: string;
 
   // そのステップの説明文（会話調）。原則「結論の断定」は避け、意味づけや確認に使う
   solution: string;
@@ -99,6 +107,7 @@ export interface HistoryItem {
   timestamp: number;
   image: string;
   result: AnalysisResult;
+  allProblems?: ExtractedProblem[];
 }
 
 export enum AppScreen {

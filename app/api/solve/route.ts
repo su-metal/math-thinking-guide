@@ -93,6 +93,7 @@ export async function POST(req: Request) {
     problem_text?: string;
     meta?: LevelMeta;
     difficulty?: Difficulty;
+    isPro?: boolean;
     debug?: boolean;
   } = {};
 
@@ -103,7 +104,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: DEFAULT_ERROR_MESSAGE }, { status: 400 });
   }
 
-  const { problem_text, meta, difficulty, debug } = payload;
+  const { problem_text, meta, difficulty, isPro, debug } = payload;
   if (!problem_text) {
     return NextResponse.json({ error: DEFAULT_ERROR_MESSAGE }, { status: 400 });
   }
@@ -117,6 +118,7 @@ export async function POST(req: Request) {
     for (let attempt = 0; attempt < 2; attempt += 1) {
       const candidate = await provider.analyzeFromText(problem_text, resolvedDifficulty, resolvedMeta, {
         debug,
+        isPro,
       });
       if (!candidate) {
         const reason = "no_candidate";
