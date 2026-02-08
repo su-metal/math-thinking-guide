@@ -1,5 +1,6 @@
 ﻿import { GoogleGenAI } from "@google/genai";
 import { LevelMeta, Difficulty } from "@/lib/levelEstimator";
+import { GradeLevel } from "@/lib/education/curriculumData";
 import { AnalysisResult, DrillResult, ExtractedProblem } from "../../types";
 import { AIProvider } from "./provider";
 import {
@@ -590,6 +591,7 @@ export class GeminiProvider implements AIProvider {
     debug?: boolean;
     promptAppend?: string;
     isPro?: boolean;
+    grade?: GradeLevel;
   }): Promise<AnalysisResult> {
     this.ensureKey();
     const totalStart = Date.now();
@@ -617,7 +619,7 @@ export class GeminiProvider implements AIProvider {
       model = GEMINI_PRO_MODEL;
     }
 
-    const prompt = createAnalysisPrompt(args.problemText, args.promptAppend);
+    const prompt = createAnalysisPrompt(args.problemText, args.promptAppend, args.grade);
 
     const isJsonError = (error: unknown) => {
       const message = (error as Error)?.message ?? "";

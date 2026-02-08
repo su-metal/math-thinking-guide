@@ -1,4 +1,5 @@
-import { AnalysisResult, DrillResult, ReadResult } from "../types";
+import { LevelMeta } from "@/lib/levelEstimator";
+import { AnalysisResult, DrillResult, ReadResult, GradeLevel } from "../types";
 
 async function handleResponse<T>(response: Response, fallbackMessage: string): Promise<T> {
   const data = await response.json().catch(() => ({}));
@@ -31,12 +32,13 @@ export async function solveMathProblem(
   problem_text: string,
   meta?: AnalysisResult["meta"],
   isPro?: boolean,
-  signal?: AbortSignal
+  signal?: AbortSignal,
+  grade?: GradeLevel
 ): Promise<AnalysisResult> {
   const response = await fetch("/api/solve", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ problem_text, meta, isPro, debug: true }),
+    body: JSON.stringify({ problem_text, meta, isPro, debug: true, grade }),
     signal
   });
 

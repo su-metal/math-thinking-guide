@@ -2,6 +2,7 @@ import { AnalysisResult, DrillResult, ExtractedProblem } from "../../types";
 import { GeminiProvider } from "./geminiProvider";
 import { OpenAIProvider } from "./openaiProvider";
 import type { Difficulty, LevelMeta } from "@/lib/levelEstimator";
+import { GradeLevel } from "@/lib/education/curriculumData";
 
 export interface AIProvider {
   name: string;
@@ -11,7 +12,7 @@ export interface AIProvider {
     problemText: string,
     difficulty: Difficulty,
     meta?: LevelMeta,
-    options?: { debug?: boolean; promptAppend?: string; isPro?: boolean }
+    options?: { debug?: boolean; promptAppend?: string; isPro?: boolean; grade?: GradeLevel }
   ): Promise<AnalysisResult>;
   analyzeWithControls(args: {
     imageBase64: string;

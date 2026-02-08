@@ -1,4 +1,8 @@
 
+import { GradeLevel } from '@/lib/education/curriculumData';
+
+export type { GradeLevel };
+
 export type StepCalculation = {
   expression: string; // 例: "3600 ÷ 15"
   result: number;     // 例: 240
@@ -51,6 +55,7 @@ export interface AnalysisResult {
   problems: MathProblem[];
   meta?: {
     difficulty: "easy" | "normal" | "hard";
+    grade?: GradeLevel;
     tags: string[];
     confidence: number;
     signals: Record<string, unknown>;

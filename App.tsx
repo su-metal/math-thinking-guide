@@ -1,7 +1,8 @@
 'use client';
 
 import React, { useState, useEffect, useRef } from 'react';
-import { AppScreen, AnalysisResult, HistoryItem, DrillProblem, DrillResult, MathProblem, ReadResult } from './types';
+import { AppScreen, AnalysisResult, HistoryItem, DrillProblem, DrillResult, MathProblem, ReadResult, GradeLevel } from './types';
+import { CURRICULUM } from './lib/education/curriculumData';
 import { readMathProblem, solveMathProblem, generateDrillProblems } from './services/geminiService';
 import {
   Camera,
@@ -33,7 +34,8 @@ import {
   ZoomIn,
   RotateCw,
   MessageCircle,
-  Undo2
+  Undo2,
+  GraduationCap
 } from 'lucide-react';
 
 const isQuotaExceededError = (error: unknown): boolean => {
@@ -330,8 +332,52 @@ const LimitReachedModal = ({ onConfirm, onCancel }: { onConfirm: () => void, onC
     </div>
   </div>
 );
+// --- Grade Select Modal ---
+const GradeSelectModal = ({ onSelect, onCancel }: { onSelect: (grade: GradeLevel) => void, onCancel: () => void }) => {
+  return (
+    <div className="fixed inset-0 z-[200] flex items-center justify-center p-6 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+      <div className="bg-white rounded-[2.5rem] w-full max-w-sm p-6 flex flex-col items-center shadow-2xl animate-in zoom-in-95 duration-300 max-h-[90vh]">
+        <div className="w-16 h-16 bg-blue-50 rounded-full flex items-center justify-center mb-4 shrink-0">
+          <GraduationCap className="w-8 h-8 text-blue-500" />
+        </div>
+        <h2 className="text-xl font-bold text-gray-800 mb-2">なん年生で解く？</h2>
+        <p className="text-gray-500 text-sm mb-6 text-center leading-relaxed">
+          学年にあわせたヒントを出すよ！
+        </p>
 
-// --- Crop Component ---
+        <div className="w-full grid grid-cols-2 gap-3 overflow-y-auto p-1">
+          {(Object.keys(CURRICULUM) as GradeLevel[]).map((grade) => (
+            <button
+              key={grade}
+              onClick={() => onSelect(grade)}
+              className="flex flex-col items-center justify-center p-4 rounded-2xl bg-gray-50 border-2 border-transparent hover:border-blue-200 hover:bg-blue-50 active:scale-95 transition-all group"
+            >
+              <span className="text-lg font-black text-gray-700 group-hover:text-blue-600 mb-1">
+                {CURRICULUM[grade].label.replace('小学', '小')}
+              </span>
+              <span className="text-[10px] text-gray-400 font-bold">
+                {grade === 'grade1' ? 'たし算・ひき算' :
+                  grade === 'grade2' ? 'かけ算・長さ' :
+                    grade === 'grade3' ? 'わり算・小数' :
+                      grade === 'grade4' ? '面積・がい数' :
+                        grade === 'grade5' ? '割合・平均' :
+                          '比・速さ'}
+              </span>
+            </button>
+          ))}
+        </div>
+
+        <button
+          onClick={onCancel}
+          className="mt-6 w-full text-gray-400 py-3 text-sm font-bold hover:text-gray-600 transition-colors"
+        >
+          あとでえらぶ
+        </button>
+      </div>
+    </div>
+  );
+};
+
 const ProblemCropScreen = ({
   image,
   onCancel,
@@ -541,6 +587,8 @@ const App: React.FC = () => {
   const [drillResult, setDrillResult] = useState<DrillResult | null>(null);
   const [tempImage, setTempImage] = useState<string | null>(null);
   const [croppedImage, setCroppedImage] = useState<string | null>(null);
+  const [selectedGrade, setSelectedGrade] = useState<GradeLevel | null>(null);
+  const [showGradeModal, setShowGradeModal] = useState<boolean>(false);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [remainingTries, setRemainingTries] = useState<number>(3);
   const [isPro, setIsPro] = useState<boolean>(false);
@@ -648,14 +696,16 @@ const App: React.FC = () => {
       if (forceCrop) {
         setCurrentScreen(AppScreen.CROP);
       } else {
-        startAnalysis(base64);
+        // クロップなしの場合も学年選択モーダルを表示
+        setCroppedImage(base64);
+        setShowGradeModal(true);
       }
     };
     reader.readAsDataURL(file);
     e.target.value = '';
   };
 
-  const startAnalysis = async (img: string) => {
+  const startAnalysis = async (img: string, grade: GradeLevel | null) => {
     setCroppedImage(img);
     setCurrentScreen(AppScreen.LOADING);
     setShowFinalAnswer(false);
@@ -666,28 +716,75 @@ const App: React.FC = () => {
 
     requestIdRef.current += 1;
     const requestId = requestIdRef.current;
+
     readAbortRef.current?.abort();
     solveAbortRef.current?.abort();
 
     try {
       const readController = new AbortController();
       readAbortRef.current = readController;
+
       const readResult = await readMathProblem(img, readController.signal);
-      if (requestIdRef.current !== requestId) return;
+
+      if (requestId !== requestIdRef.current) return;
 
       const extractedProblems = Array.isArray(readResult.problems) ? readResult.problems : [];
-      if (extractedProblems.length === 0) {
+
+      if (extractedProblems.length > 0) {
+        setReadProblems(extractedProblems);
+        setAnalysisPhase("read_done");
+
+        // 自動で1問目を解く
+        const firstProblem = extractedProblems[0];
+        setReadProblemText(firstProblem.problem_text);
+        setAnalysisPhase("solving");
+
+        const solveController = new AbortController();
+        solveAbortRef.current = solveController;
+
+        const result = await solveMathProblem(
+          firstProblem.problem_text,
+          undefined,
+          isPro,
+          solveController.signal,
+          grade ?? undefined
+        );
+
+        if (requestId !== requestIdRef.current) return;
+
+        if (result.meta && grade) {
+          result.meta.grade = grade;
+        }
+
+        setAnalysisResult(result);
+        setAnalysisPhase("done");
+
+        const newItem: HistoryItem = {
+          id: result.problems[0].id,
+          timestamp: Date.now(),
+          image: img,
+          result: result,
+          allProblems: extractedProblems
+        };
+        const updatedHistory = [newItem, ...history];
+        const saved = saveHistory(updatedHistory);
+        setHistory(saved);
+
+        if (!isPro) {
+          const newCredits = remainingTries - 1;
+          setRemainingTries(newCredits);
+          localStorage.setItem('user_credits', newCredits.toString());
+        }
+
+        setCurrentScreen(AppScreen.RESULT);
+      } else {
         throw new Error("問題が見つかりませんでした。もっと明るい場所で、問題を大きく撮ってみてね。");
       }
 
-      setReadProblemText(extractedProblems[0]?.problem_text ?? null);
-      setReadProblems(extractedProblems);
-      setAnalysisPhase("read_done");
-      setCurrentScreen(AppScreen.PROBLEM_SELECT);
     } catch (err: any) {
-      if (isAbortError(err)) {
-        return;
-      }
+      if (requestId !== requestIdRef.current) return;
+      if (isAbortError(err)) return;
+      console.error(err);
       setAnalysisPhase("error");
       alert(err.message || "エラーがおきました。もういちど試してね。");
       setCurrentScreen(AppScreen.HOME);
@@ -700,7 +797,6 @@ const App: React.FC = () => {
     const selected = selectableProblems[index];
     if (!selected) return;
 
-    // もし抽出された問題リストがある場合（スキャン直後や完了画面から戻った場合）
     if (readProblems) {
       const currentSolvedText = analysisResult?.problems?.[0]?.problem_text;
       const needsSolve = !analysisResult || currentSolvedText !== selected.problem_text;
@@ -714,49 +810,39 @@ const App: React.FC = () => {
         solveAbortRef.current = solveController;
 
         try {
-          const result = await solveMathProblem(selected.problem_text, analysisResult?.meta, isPro, solveAbortRef.current.signal);
+          // 既存の meta.grade があればそれを使う（履歴からの再開など）
+          // なければ現在の selectedGrade を使う
+          const gradeToUse = analysisResult?.meta?.grade ?? selectedGrade ?? undefined;
 
-          console.log("---------- [SPACKY AI SOLUTION START] ----------");
-          console.log(JSON.stringify(result, null, 2));
-          console.log("---------- [SPACKY AI SOLUTION END] ----------");
+          const result = await solveMathProblem(
+            selected.problem_text,
+            analysisResult?.meta,
+            isPro,
+            solveAbortRef.current.signal,
+            gradeToUse
+          );
+
+          if (result.meta && gradeToUse) {
+            result.meta.grade = gradeToUse;
+          }
 
           setAnalysisResult(result);
-          setCurrentProblemIndex(0); // solveResultは常に1件
+          setCurrentProblemIndex(0);
           setCurrentStepIndex(0);
           setAnalysisPhase("done");
           setCurrentScreen(AppScreen.RESULT);
 
-          const historyItem: HistoryItem = {
-            id: Date.now().toString(),
-            timestamp: Date.now(),
-            image: croppedImage ?? "",
-            result: result,
-            allProblems: readProblems ?? []
-          };
-          console.log("[debug] before save history method_hint", historyItem?.result?.problems?.[0]?.method_hint);
-          appendHistoryItem(historyItem);
-
-          // クレジットの消費（成功時のみ）
-          if (!isPro) {
-            const nextCredits = Math.max(0, remainingTries - 1);
-            setRemainingTries(nextCredits);
-            localStorage.setItem('user_credits', nextCredits.toString());
-          }
         } catch (err: any) {
-          if (isAbortError(err)) {
-            return;
-          }
-          setAnalysisPhase("error");
+          if (isAbortError(err)) return;
+          console.error(err);
           alert(err.message || "エラーがおきました。もういちど試してね。");
-          setCurrentScreen(AppScreen.HOME);
+          setCurrentScreen(AppScreen.PROBLEM_SELECT);
         }
         return;
       } else {
-        // すでに解かれている問題ならそのまま表示
         setCurrentProblemIndex(0);
       }
     } else {
-      // 履歴から直接開く場合など
       setCurrentProblemIndex(index);
     }
 
@@ -1756,21 +1842,60 @@ const App: React.FC = () => {
     </div>
   );
 
+  let screenContent;
   switch (currentScreen) {
-    case AppScreen.SPLASH: return <SplashScreen />;
-    case AppScreen.ONBOARDING: return renderOnboarding();
-    case AppScreen.HOME: return renderHome();
-    case AppScreen.CROP: return tempImage ? <ProblemCropScreen image={tempImage} onCancel={() => setCurrentScreen(AppScreen.HOME)} onComplete={startAnalysis} /> : null;
-    case AppScreen.LOADING: return renderLoading();
-    case AppScreen.PROBLEM_SELECT: return renderProblemSelect();
-    case AppScreen.RESULT: return renderResult();
-    case AppScreen.DRILL: return renderDrill();
-    case AppScreen.HISTORY: return renderHistory();
-    case AppScreen.SETTINGS: return renderSettings();
-    case AppScreen.PAYWALL: return renderPaywall();
-    case AppScreen.PRO_MANAGEMENT: return renderProManagement();
-    default: return renderHome();
+    case AppScreen.SPLASH: screenContent = <SplashScreen />; break;
+    case AppScreen.ONBOARDING: screenContent = renderOnboarding(); break;
+    case AppScreen.HOME: screenContent = renderHome(); break;
+    case AppScreen.CROP:
+      screenContent = (
+        <div className="min-h-screen bg-black flex flex-col items-center justify-center">
+          {tempImage && (
+            <ProblemCropScreen
+              image={tempImage}
+              onCancel={() => {
+                setTempImage(null);
+                setCurrentScreen(AppScreen.HOME);
+              }}
+              onComplete={(img) => {
+                setCroppedImage(img);
+                setShowGradeModal(true);
+              }}
+            />
+          )}
+        </div>
+      );
+      break;
+    case AppScreen.LOADING: screenContent = renderLoading(); break;
+    case AppScreen.PROBLEM_SELECT: screenContent = renderProblemSelect(); break;
+    case AppScreen.RESULT: screenContent = renderResult(); break;
+    case AppScreen.DRILL: screenContent = renderDrill(); break;
+    case AppScreen.HISTORY: screenContent = renderHistory(); break;
+    case AppScreen.SETTINGS: screenContent = renderSettings(); break;
+    case AppScreen.PAYWALL: screenContent = renderPaywall(); break;
+    case AppScreen.PRO_MANAGEMENT: screenContent = renderProManagement(); break;
+    default: screenContent = renderHome(); break;
   }
+
+  return (
+    <>
+      {screenContent}
+      {showGradeModal && croppedImage && (
+        <GradeSelectModal
+          onSelect={(grade) => {
+            setSelectedGrade(grade);
+            setShowGradeModal(false);
+            startAnalysis(croppedImage, grade);
+          }}
+          onCancel={() => {
+            setShowGradeModal(false);
+            startAnalysis(croppedImage, null);
+          }}
+        />
+      )}
+    </>
+  );
 };
 
 export default App;
+

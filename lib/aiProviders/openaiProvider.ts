@@ -1,3 +1,4 @@
+import { GradeLevel } from "@/lib/education/curriculumData";
 import { AnalysisResult, DrillResult, ExtractedProblem } from "../../types";
 import { AIProvider } from "./provider";
 import {
@@ -369,7 +370,7 @@ export class OpenAIProvider implements AIProvider {
     problemText: string,
     difficulty: "easy" | "normal" | "hard",
     meta?: { tags?: string[] },
-    options?: { debug?: boolean; promptAppend?: string }
+    options?: { debug?: boolean; promptAppend?: string; grade?: GradeLevel }
   ) {
     return this.analyzeFromTextInternal({
       problemText,

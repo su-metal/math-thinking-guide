@@ -1,4 +1,5 @@
 import type { Difficulty } from "@/lib/levelEstimator";
+import { CURRICULUM, GradeLevel } from "@/lib/education/curriculumData";
 
 export const ANALYSIS_PROMPT = `
 あなたは小学校の算数の「思考力」を育てるAI先生（スパッキー）です。
@@ -75,9 +76,25 @@ export const OUTLINE_PROMPT = `
 
 
 
-export function createAnalysisPrompt(problemText: string, extraInstruction?: string) {
+export function createAnalysisPrompt(problemText: string, extraInstruction?: string, grade?: GradeLevel) {
   const extra = extraInstruction ? `\n\n【追加ルール】\n${extraInstruction}\n` : "";
-  return `${ANALYSIS_PROMPT}${extra}\n【問題文】\n${problemText}\n`.trim();
+  
+  let gradeInstruction = "";
+  if (grade && CURRICULUM[grade]) {
+    const data = CURRICULUM[grade];
+    gradeInstruction = `
+【対象学年: ${data.label}】
+■使える武器（既習事項）:
+${data.weapons.join(', ')}
+
+■禁止事項（未習事項）:
+${data.forbidden.join(', ')}
+
+★重要: 上記の「禁止事項」に含まれる解法（例: ${data.forbidden.slice(0, 3).join(', ')}など）は絶対に使わないでください。小学生が習っている「使える武器」だけで解いてください。
+    `.trim();
+  }
+
+  return `${ANALYSIS_PROMPT}${extra}\n\n${gradeInstruction}\n\n【問題文】\n${problemText}\n`.trim();
 }
 
 export function createOutlinePrompt(problemText: string) {
@@ -424,11 +441,27 @@ ${problemText}
 
 export function createSolvePrompt(args: {
   problemText: string;
+  grade?: GradeLevel;
   meta?: { difficulty?: Difficulty; tags?: string[] };
 }) {
   const difficulty = args.meta?.difficulty ?? "normal";
   const tags = Array.isArray(args.meta?.tags) ? args.meta?.tags : [];
   const tagLine = tags.length ? `タグ: ${tags.join(", ")}` : "タグ: なし";
+
+  let gradeInstruction = "";
+  if (args.grade && CURRICULUM[args.grade]) {
+    const data = CURRICULUM[args.grade];
+    gradeInstruction = `
+【対象学年: ${data.label}】
+■使える武器（既習事項）:
+${data.weapons.join(', ')}
+
+■禁止事項（未習事項）:
+${data.forbidden.join(', ')}
+
+★重要: 上記の「禁止事項」に含まれる解法はこの問題の解説で絶対に使わないでください。
+    `.trim();
+  }
 
   return `
 あなたは算数の問題を解き方まで整理するアシスタントです。
@@ -478,5 +511,6 @@ ${args.problemText}
 【メタ情報】
 難易度: ${difficulty}
 ${tagLine}
+${gradeInstruction}
 `.trim();
 }

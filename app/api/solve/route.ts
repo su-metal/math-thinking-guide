@@ -6,7 +6,7 @@ import { getAIProvider } from "@/lib/aiProviders/provider";
 import { estimateLevel, type Difficulty, type LevelMeta } from "@/lib/levelEstimator";
 import { computeExpression } from "@/lib/math/computeExpression";
 import { validateCalculations } from "@/lib/routing/qualityGate";
-import type { AnalysisResult } from "@/types";
+import type { AnalysisResult, GradeLevel } from "@/types";
 
 const DEFAULT_ERROR_MESSAGE =
   "AIが問題を読み取れませんでした。明るい場所でもういちど撮ってみてね。";
@@ -95,6 +95,7 @@ export async function POST(req: Request) {
     difficulty?: Difficulty;
     isPro?: boolean;
     debug?: boolean;
+    grade?: GradeLevel;
   } = {};
 
   try {
@@ -104,7 +105,7 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: DEFAULT_ERROR_MESSAGE }, { status: 400 });
   }
 
-  const { problem_text, meta, difficulty, isPro, debug } = payload;
+  const { problem_text, meta, difficulty, isPro, debug, grade } = payload;
   if (!problem_text) {
     return NextResponse.json({ error: DEFAULT_ERROR_MESSAGE }, { status: 400 });
   }
@@ -119,6 +120,7 @@ export async function POST(req: Request) {
       const candidate = await provider.analyzeFromText(problem_text, resolvedDifficulty, resolvedMeta, {
         debug,
         isPro,
+        grade,
       });
       if (!candidate) {
         const reason = "no_candidate";
